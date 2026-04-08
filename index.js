@@ -35350,6 +35350,8 @@ const date = '01.04.26';
 
 // Tweakpane-editable sketch controls (also read by media/recording modules).
 const params = {
+  fill: '#000000',
+  background: '#ffffff',
   // Default media paths (image / video) for mediaSetup.
   source: 'v',
   path: '4.jpg',
@@ -35438,7 +35440,7 @@ const sketch = ({
       } = props;
 
       // Visible frame: white background, then vector circles on top.
-      context.fillStyle = 'white';
+      context.fillStyle = params.background;
       context.fillRect(0, 0, width, height);
       svgFrameLog.reset();
 
@@ -35540,7 +35542,7 @@ const sketch = ({
         viscosity: params.viscosity,
         handleRate: params.handleRate,
         maxDistance: cellSize * params.maxDistanceFactor,
-        fill: '#000000',
+        fill: params.fill,
         svgLog: svgFrameLog
       };
 
@@ -35657,6 +35659,12 @@ function createPane() {
   }).on('change', () => {
     onSizeSourceChange();
     syncMediaPostControlsVisibility();
+  });
+  pane.addInput(params, 'fill', {
+    label: 'Fill'
+  });
+  pane.addInput(params, 'background', {
+    label: 'Background'
   });
   // pane.addInput(params, 'cx', { min: 0, max: 1, step: 0.001 });
   // pane.addInput(params, 'cy', { min: 0, max: 1, step: 0.001 });
