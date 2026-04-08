@@ -35449,9 +35449,9 @@ const sketch = ({
       const maxR = cellSize * params.maxRFactor;
       const minR = cellSize * params.minRFactor;
       const circles = new Array(cols * rows);
-      const noiseScale = 0.01;
-      const timeScale = 0.05;
-      const frequency = 0.1;
+      const noiseScale = 0.02;
+      const timeScale = 0.09;
+      const frequency = 0.08;
       const amplitude = 1;
       let pixels = null;
       const useMediaForSize = params.sizeSource === 'media' && mediaSetup.state.media;
@@ -35527,7 +35527,7 @@ const sketch = ({
             const n = random.noise3D(x * noiseScale, y * noiseScale, frame * timeScale, frequency, amplitude);
             fieldValue01 = math.mapRange(n, -1, 1, 0, 1, true);
           }
-          const afterFalloff = Math.pow(fieldValue01, params.falloff);
+          const afterFalloff = Math.pow(fieldValue01, params.falloff * 0.5);
           const r = minR + afterFalloff * (maxR - minR);
           circles[ix + iy * cols] = {
             x,
