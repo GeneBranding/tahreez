@@ -1,4 +1,46 @@
 (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+/**
+ * Pointer event → normalized 0…1 position inside the canvas *bitmap*.
+ *
+ * The canvas is stretched to its container and letterboxed with
+ * `object-fit: contain` (css/styles.css), so the element box is usually a
+ * different shape from the bitmap. Dividing offsetX by offsetWidth measures the
+ * element box and drifts from the real image whenever the two disagree, which
+ * is why the offset came and went with the window size. Measuring the contained
+ * rectangle instead keeps the cursor, the brush guide and the paint aligned.
+ *
+ * clientX/Y against getBoundingClientRect also survives page scroll and drags
+ * that stray outside the canvas, unlike offsetX (relative to whatever is hovered).
+ */
+function pointerToCanvas01(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || !canvas.width || !canvas.height) {
+    return { x: 0.5, y: 0.5 };
+  }
+  // `contain` scales the bitmap by the smaller of the two ratios, then centres it.
+  const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+  const shownWidth = canvas.width * scale;
+  const shownHeight = canvas.height * scale;
+  const originX = rect.left + (rect.width - shownWidth) / 2;
+  const originY = rect.top + (rect.height - shownHeight) / 2;
+  return {
+    x: (e.clientX - originX) / shownWidth,
+    y: (e.clientY - originY) / shownHeight,
+  };
+}
+
+/**
+ * Is the pointer over the drawn artwork, rather than the letterbox around it?
+ *
+ * The canvas element fills the area beside the panel, so it usually extends
+ * past the artwork on two sides. Events out there belong to the page — swallowing
+ * them would block scrolling and let strokes start in empty space.
+ */
+function isOverArtwork(canvas, e) {
+  const p = pointerToCanvas01(canvas, e);
+  return p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1;
+}
+
 function setupMouseEvents(options) {
   const { canvas, params, render, axisSnapWithShift } = options;
 
@@ -26,8 +68,7 @@ function setupMouseEvents(options) {
   }
 
   function onMouseMove(e) {
-    const rawCx = e.offsetX / canvas.offsetWidth;
-    const rawCy = e.offsetY / canvas.offsetHeight;
+    const { x: rawCx, y: rawCy } = pointerToCanvas01(canvas, e);
     lastRawCx = rawCx;
     lastRawCy = rawCy;
     applyPointerFromRaw(rawCx, rawCy, e.shiftKey);
@@ -46,11 +87,12 @@ function setupMouseEvents(options) {
   }
 
   function onMouseDown(e) {
+    // A press in the letterbox is not on the artwork; leave it to the page.
+    if (!isOverArtwork(canvas, e)) return;
     isDragging = true;
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-    const rawCx = e.offsetX / canvas.offsetWidth;
-    const rawCy = e.offsetY / canvas.offsetHeight;
+    const { x: rawCx, y: rawCy } = pointerToCanvas01(canvas, e);
     anchorCx = rawCx;
     anchorCy = rawCy;
     lastRawCx = rawCx;
@@ -87,13 +129,19 @@ function setupMouseEvents(options) {
   };
 }
 
-// Pointer down on canvas + S-key held (keydown/keyup). Sketch reads flags in render.
+// Tracks whether the pointer is down on the canvas; the sketch reads this in
+// render. Also tracks hover position so the sketch can draw a brush cursor, and
+// forwards wheel deltas to `onWheel` for brush resizing.
 function setupMouseTraceInput(options) {
-  const { canvas } = options;
+  const { canvas, onWheel } = options;
   let isPointerDown = false;
-  let sKeyHeld = false;
+  // Normalized 0…1 hover position; the sketch needs this even when not drawing.
+  let pointerX = 0.5;
+  let pointerY = 0.5;
+  let isPointerOver = false;
 
-  function onCanvasMouseDown() {
+  function onCanvasMouseDown(e) {
+    if (!isOverArtwork(canvas, e)) return;
     isPointerDown = true;
   }
 
@@ -101,29 +149,52 @@ function setupMouseTraceInput(options) {
     isPointerDown = false;
   }
 
-  function onWindowKeyDown(e) {
-    if (e.key !== 's' && e.key !== 'S') return;
-    sKeyHeld = true;
+  function onCanvasMouseMove(e) {
+    const p = pointerToCanvas01(canvas, e);
+    pointerX = p.x;
+    pointerY = p.y;
+    isPointerOver = p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1;
   }
 
-  function onWindowKeyUp(e) {
-    if (e.key !== 's' && e.key !== 'S') return;
-    sKeyHeld = false;
+  // No mouseenter handler: entering the element says nothing about whether the
+  // pointer is over the artwork. The first mousemove sets the flag correctly.
+  function onCanvasMouseLeave() {
+    isPointerOver = false;
+  }
+
+  function onCanvasWheel(e) {
+    if (!onWheel) return;
+    // Ctrl/Cmd + wheel is the browser's zoom gesture on both platforms, and on
+    // macOS trackpad pinch-to-zoom arrives as ctrlKey + wheel. Leave it alone.
+    if (e.ctrlKey || e.metaKey) return;
+    // Outside the artwork this is an ordinary page scroll — do not touch it.
+    if (!isOverArtwork(canvas, e)) return;
+    // Shift+wheel is delivered as horizontal scroll on many trackpads and mice,
+    // so fall back to deltaX or the Shift shortcut would do nothing.
+    const delta = e.deltaY || e.deltaX;
+    // Only swallow the scroll when the handler actually used it, so the page
+    // still scrolls normally over the canvas in the other modes.
+    if (onWheel(delta, { altKey: e.altKey, shiftKey: e.shiftKey }))
+      e.preventDefault();
   }
 
   canvas.addEventListener('mousedown', onCanvasMouseDown);
+  canvas.addEventListener('mousemove', onCanvasMouseMove);
+  canvas.addEventListener('mouseleave', onCanvasMouseLeave);
+  // passive:false so preventDefault() can stop the page scrolling.
+  canvas.addEventListener('wheel', onCanvasWheel, { passive: false });
   window.addEventListener('mouseup', onWindowMouseUp);
-  window.addEventListener('keydown', onWindowKeyDown);
-  window.addEventListener('keyup', onWindowKeyUp);
 
   return {
     isPointerDown: () => isPointerDown,
-    isSKeyHeld: () => sKeyHeld,
+    /** Hover position in 0…1 canvas space, plus whether the cursor is over the canvas. */
+    getPointer: () => ({ x: pointerX, y: pointerY, isOver: isPointerOver }),
     dispose() {
       canvas.removeEventListener('mousedown', onCanvasMouseDown);
+      canvas.removeEventListener('mousemove', onCanvasMouseMove);
+      canvas.removeEventListener('mouseleave', onCanvasMouseLeave);
+      canvas.removeEventListener('wheel', onCanvasWheel);
       window.removeEventListener('mouseup', onWindowMouseUp);
-      window.removeEventListener('keydown', onWindowKeyDown);
-      window.removeEventListener('keyup', onWindowKeyUp);
     },
   };
 }
@@ -168,13 +239,50 @@ function initMedia(params) {
 }
 
 /**
- * Set mediaCanvas size from aspect ratio and return canvas-sketch dimensions.
+ * Longest edge of the offscreen sampling buffer. The media is read back with
+ * getImageData every frame but sampled only once per grid cell, so matching a
+ * large photo pixel for pixel costs a lot for detail nothing reads.
+ */
+const MEDIA_SAMPLE_BUFFER_MAX = 1400;
+
+/**
+ * Canvas-sketch dimensions for the loaded media, and the sampling buffer size.
+ *
+ * Exports use the media's own pixel size, so a 4000x3000 photo comes out at
+ * 4000x3000 rather than being resampled to a fixed width. The preview is scaled
+ * down to fit separately (scaleToView in the sketch).
+ *
+ * @param {number} ratio - height / width, used only when the intrinsic size is
+ *   not yet known (media still loading)
  */
 function getMediaDimensions(ratio, params) {
-  const canvW = params.canvW;
-  mediaCanvas.width = canvW * params.mCanvFactor;
-  mediaCanvas.height = canvW * ratio * params.mCanvFactor;
-  return { dimensions: [canvW, canvW * ratio] };
+  const size = getCurrentMediaSize();
+  const width = size ? size.width : params.canvasWidth;
+  const height = size ? size.height : Math.round(params.canvasWidth * ratio);
+
+  const fit = Math.min(1, MEDIA_SAMPLE_BUFFER_MAX / Math.max(width, height));
+  const scale = fit * (params.mCanvFactor || 1);
+  mediaCanvas.width = Math.max(1, Math.round(width * scale));
+  mediaCanvas.height = Math.max(1, Math.round(height * scale));
+
+  return { dimensions: [width, height] };
+}
+
+/** Intrinsic pixel size of the loaded media, or null while it is still unknown. */
+function getCurrentMediaSize() {
+  if (!state.media) return null;
+
+  let w = 0;
+  let h = 0;
+  if (state.srcType === 'image') {
+    w = state.media.naturalWidth || state.media.width;
+    h = state.media.naturalHeight || state.media.height;
+  } else if (state.srcType === 'video') {
+    w = state.media.videoWidth || state.media.width;
+    h = state.media.videoHeight || state.media.height;
+  }
+  if (!w || !h) return null;
+  return { width: w, height: h };
 }
 
 function getCurrentMediaRatio() {
@@ -207,7 +315,7 @@ let initialMediaReadyWired = false;
  * Wire initial media (from initMedia) to call onDimensionsReady when loaded.
  * Only runs once; after upload + loadAndRun the sketch runs again but we skip to avoid re-triggering.
  * @param {Object} options
- * @param {Object} options.params - sketch params (canvW, mCanvFactor)
+ * @param {Object} options.params - sketch params (canvasWidth, mCanvFactor)
  * @param {function(Object)} options.onDimensionsReady - called with { dimensions } when media is ready
  */
 function setupInitialMediaReady(options) {
@@ -249,7 +357,7 @@ let fileInputWired = false;
 /**
  * Wire file input change handler. Call after manager/sketch exist. Only wires once.
  * @param {Object} options
- * @param {Object} options.params - sketch params (canvW, mCanvFactor)
+ * @param {Object} options.params - sketch params (canvasWidth, mCanvFactor)
  * @param {function(Object)} options.onDimensionsReady - called with { dimensions } when media is loaded
  * @param {function} [options.playManager] - optional, e.g. () => manager.play()
  */
@@ -309,6 +417,7 @@ module.exports = {
   initMedia,
   getMediaDimensions,
   getCurrentMediaRatio,
+  getCurrentMediaSize,
   getMediaDimensionsFromCurrentMedia,
   setupInitialMediaReady,
   inputMedia,
@@ -338,7 +447,10 @@ function getVector(center, angle, radius) {
   };
 }
 
-function drawCircle(context, circle, fill = '#1e1e1e', svgLog) {
+// Fallback shape colour; callers normally pass params.fill from the sketch.
+const DEFAULT_FILL = '#232e33';
+
+function drawCircle(context, circle, fill = DEFAULT_FILL, svgLog) {
   context.beginPath();
   context.arc(circle.x, circle.y, circle.r, 0, Math.PI * 2);
   context.fillStyle = fill;
@@ -412,7 +524,7 @@ function getMetaballConnectorGeometry(c1, c2, options = {}) {
 }
 
 function drawTwoCircleMetaball(context, c1, c2, options = {}) {
-  const fill = options.fill ?? '#1e1e1e';
+  const fill = options.fill ?? DEFAULT_FILL;
   const g = getMetaballConnectorGeometry(c1, c2, options);
   if (!g) return;
 
@@ -444,12 +556,9 @@ const Color = require('canvas-sketch-util/color');
 const prepareDocument = css => {
   const head = document.head;
 
-  //add favicon 
-  const faviconLink = document.createElement('link');
-  faviconLink.rel = 'icon';
-  faviconLink.type = 'image/svg+xml';
-  faviconLink.href = './assets/favicon.svg';
-  head.appendChild(faviconLink);
+  // Favicon comes from the <link> tag in index.html — do not inject one here.
+  // A second injected link would append after it and silently win.
+
   let link = document.createElement('link');
   link.type = 'text/css';
   link.rel = 'stylesheet';
@@ -619,14 +728,14 @@ const createFooter = (paneDiv, ver, date) => {
   footnoteDiv.innerHTML = 'Developed by<br><a href="https://www.genetik.studio" target="_blank" rel="noopener noreferrer">Genetik Studio</a><br>';
   const logoDiv = document.createElement('DIV');
   logoDiv.setAttribute('class', 'logo');
-  logoDiv.innerHTML = '<a href="https://www.instagram.com/genetikstudio/" target="_blank" rel="noopener noreferrer">' + '<img src="./assets/genetik.svg" alt="Genetik Studio on Instagram" width="28" height="26" />' + '</a>';
+  logoDiv.innerHTML = '<a href="https://www.instagram.com/genetikstudio/" target="_blank" rel="noopener noreferrer">' + '<img src="./assets/genetik.svg" alt="Genetik Studio on Instagram" width="22" height="21" />' + '</a>';
   footerDiv.appendChild(logoDiv);
   footerDiv.appendChild(footnoteDiv);
   paneDiv.childNodes[0].appendChild(footerDiv);
 };
 exports.createFooter = createFooter;
 
-},{"canvas-sketch-util/color":10}],5:[function(require,module,exports){
+},{"canvas-sketch-util/color":11}],5:[function(require,module,exports){
 "use strict";
 
 const paper = require('paper');
@@ -745,7 +854,7 @@ function uniteFrameLogItems(width, height, items) {
   const acc = mergePathsPairTree(pieces);
   if (!acc) return null;
   const pathData = paperItemToSvgPathData(acc);
-  let fill = '#1f2f34';
+  let fill = '#232e33';
   for (let j = 0; j < items.length; j++) {
     if (items[j].fill) {
       fill = items[j].fill;
@@ -764,7 +873,7 @@ function uniteFrameLogItems(width, height, items) {
  * Intended for occasional SVG export only — pairwise unite() is too slow for animation frames.
  */
 function drawUnitedSilhouette(context, width, height, circles, cols, metaballOptions) {
-  const fill = metaballOptions.fill ?? '#1f2f34';
+  const fill = metaballOptions.fill ?? '#232e33';
   if (!circles.length || !ensurePaperScope(width, height)) {
     return;
   }
@@ -807,119 +916,131 @@ module.exports = {
   uniteFrameLogItems
 };
 
-},{"./metaballs.js":3,"paper":24}],6:[function(require,module,exports){
+},{"./metaballs.js":3,"paper":25}],6:[function(require,module,exports){
+"use strict";
+
+/** "tahreez-2026.08.05-14.30.22.webm" */
 function buildRecordingFilename(mimeType) {
+  const ext = mimeType && mimeType.includes("mp4") ? "mp4" : "webm";
   const ts = new Date();
-  const pad = (n) => (n < 10 ? '0' + n : '' + n);
-  const ext = mimeType && mimeType.includes('mp4') ? 'mp4' : 'webm';
-  return `CC-${ts.getFullYear()}.${pad(ts.getMonth() + 1)}.${pad(ts.getDate())}-${ts.getHours()}.${pad(ts.getMinutes())}.${pad(ts.getSeconds())}.${ext}`;
+  const pad = n => n < 10 ? "0" + n : "" + n;
+  const stamp = `${ts.getFullYear()}.${pad(ts.getMonth() + 1)}.${pad(ts.getDate())}` + `-${pad(ts.getHours())}.${pad(ts.getMinutes())}.${pad(ts.getSeconds())}`;
+  return `tahreez-${stamp}.${ext}`;
 }
 
 /** Sync recording with timeline only for real video elements (not images). */
 function isVideoPlaybackMedia(media) {
-  return (
-    media != null &&
-    typeof media.play === 'function' &&
-    typeof media.pause === 'function' &&
-    typeof media.addEventListener === 'function'
-  );
+  return media != null && typeof media.play === "function" && typeof media.pause === "function" && typeof media.addEventListener === "function";
 }
-
 function pickSupportedMimeType() {
-  if (typeof MediaRecorder === 'undefined') return '';
-  const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-    'video/mp4',
-  ];
+  if (typeof MediaRecorder === "undefined") return "";
+  const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
   for (let i = 0; i < candidates.length; i++) {
     if (MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
   }
-  return '';
+  return "";
 }
 
+/**
+ * Bitrate needs to follow the canvas size. A flat number is generous at
+ * 1000x1000 but starves a 4000x4000 canvas, which has 16x the pixels to encode
+ * in the same bits — that shows up as blocking and smearing on the gradients.
+ * These aim for a roughly constant quality per pixel instead.
+ */
+const TARGET_BITS_PER_PIXEL = 0.9; // VP9 is ~visually lossless around here
+const ASSUMED_FPS = 30;
+const MIN_VIDEO_BITRATE = 90000000; // never drop below the previous flat rate
+const MAX_VIDEO_BITRATE = 200000000; // past this, files balloon for little gain
+
+function pickVideoBitrate(canvasEl) {
+  const pixels = canvasEl && canvasEl.width && canvasEl.height ? canvasEl.width * canvasEl.height : 0;
+  if (!pixels) return MIN_VIDEO_BITRATE;
+  const target = pixels * ASSUMED_FPS * TARGET_BITS_PER_PIXEL;
+  return Math.round(Math.min(MAX_VIDEO_BITRATE, Math.max(MIN_VIDEO_BITRATE, target)));
+}
 function createRecorder(options) {
-  const { canvas, getCanvas, getMedia, onStateChange } = options;
-
-  const resolveCanvas = () =>
-    typeof getCanvas === 'function' ? getCanvas() : canvas;
-
+  // onBeforeStart runs before the canvas stream is captured, so the caller can
+  // resize the canvas to its true output size; onAfterStop runs once the file
+  // has been handed over, to undo that.
+  const {
+    canvas,
+    getCanvas,
+    getMedia,
+    onStateChange,
+    onBeforeStart,
+    onAfterStop
+  } = options;
+  const resolveCanvas = () => typeof getCanvas === "function" ? getCanvas() : canvas;
   let isRecording = false;
   let mediaRecorder = null;
   let recordedBlobs = [];
-
-  const setRecordingState = (nextState) => {
+  const setRecordingState = nextState => {
     isRecording = nextState;
-    if (typeof onStateChange === 'function') onStateChange(nextState);
+    if (typeof onStateChange === "function") onStateChange(nextState);
   };
-
   const stopIfActive = () => {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
   };
 
   /** Trigger save dialog when recording finishes (MediaRecorder fires onstop async). */
   const offerDownload = (blob, filename) => {
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const a = document.createElement("a");
     a.href = url;
     a.download = filename;
     // Off-screen but in-document; display:none can block programmatic download in some browsers.
     Object.assign(a.style, {
-      position: 'fixed',
-      left: '-9999px',
-      top: '0',
-      width: '1px',
-      height: '1px',
-      opacity: '0',
-      pointerEvents: 'none',
+      position: "fixed",
+      left: "-9999px",
+      top: "0",
+      width: "1px",
+      height: "1px",
+      opacity: "0",
+      pointerEvents: "none"
     });
-
     const cleanup = () => {
       URL.revokeObjectURL(url);
       if (a.parentNode) a.remove();
     };
-
     document.body.appendChild(a);
-    a.addEventListener('click', () => setTimeout(cleanup, 500), { once: true });
+    a.addEventListener("click", () => setTimeout(cleanup, 500), {
+      once: true
+    });
     const autoRemove = window.setTimeout(cleanup, 120000);
-    a.addEventListener('click', () => clearTimeout(autoRemove), { once: true });
-
+    a.addEventListener("click", () => clearTimeout(autoRemove), {
+      once: true
+    });
     requestAnimationFrame(() => {
       a.click();
     });
   };
-
   const stopAndDownload = () => {
-    const blobType =
-      mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'video/webm';
-    const blob = new Blob(recordedBlobs, { type: blobType });
+    const blobType = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : "video/webm";
+    const blob = new Blob(recordedBlobs, {
+      type: blobType
+    });
     const filename = buildRecordingFilename(blobType);
-
     if (!blob.size) {
-      console.warn(
-        'Recording produced no video data. The canvas capture stream may be empty or recording may not be supported for this MIME type in your browser.'
-      );
+      console.warn("Recording produced no video data. The canvas capture stream may be empty or recording may not be supported for this MIME type in your browser.");
       setRecordingState(false);
       return;
     }
-
     offerDownload(blob, filename);
     setRecordingState(false);
   };
-
-  const beginRecording = (canvasEl) => {
+  const beginRecording = canvasEl => {
     recordedBlobs = [];
     const mimeType = pickSupportedMimeType();
-    const recorderOptions = { videoBitsPerSecond: 50000000 };
+    // Sized from the canvas the stream was just captured from, which by now is
+    // at full export resolution (see onBeforeStart).
+    const recorderOptions = {
+      videoBitsPerSecond: pickVideoBitrate(canvasEl)
+    };
     if (mimeType) recorderOptions.mimeType = mimeType;
-
     mediaRecorder = new MediaRecorder(canvasEl.captureStream(), recorderOptions);
-
-    mediaRecorder.ondataavailable = (e) => {
+    mediaRecorder.ondataavailable = e => {
       if (e.data && e.data.size > 0) recordedBlobs.push(e.data);
     };
-
     mediaRecorder.onstop = () => {
       stopAndDownload();
       const media = getMedia();
@@ -927,50 +1048,176 @@ function createRecorder(options) {
         media.loop = true;
         media.play();
       }
+      // Only now is it safe to put the canvas back to its preview size.
+      if (typeof onAfterStop === "function") onAfterStop();
     };
 
     // Timeslice yields chunks while recording; some browsers omit data if you only call stop() with no prior chunks.
     mediaRecorder.start(200);
   };
-
   const toggle = () => {
     const media = getMedia();
     const nextState = !isRecording;
     const syncVideo = isVideoPlaybackMedia(media);
-
     if (syncVideo) media.currentTime = 0;
-
     if (nextState) {
       const canvasEl = resolveCanvas();
-      if (!canvasEl || typeof canvasEl.captureStream !== 'function') {
-        console.warn('Recording: canvas is not ready yet.');
+      if (!canvasEl || typeof canvasEl.captureStream !== "function") {
+        console.warn("Recording: canvas is not ready yet.");
         return;
       }
+      // Resize to full output size BEFORE captureStream, so the stream is
+      // created at the real dimensions rather than the preview ones.
+      if (typeof onBeforeStart === "function") onBeforeStart();
       setRecordingState(true);
       beginRecording(canvasEl);
       if (syncVideo) {
         media.loop = false;
-        media.addEventListener('ended', stopIfActive, { once: true });
+        media.addEventListener("ended", stopIfActive, {
+          once: true
+        });
       }
     } else {
       setRecordingState(false);
       stopIfActive();
     }
   };
-
   return {
     toggle,
     get isRecording() {
       return isRecording;
+    }
+  };
+}
+module.exports = {
+  createRecorder
+};
+
+},{}],7:[function(require,module,exports){
+/**
+ * Floating "keyboard shortcuts" button, bottom-right of the page.
+ * Click it to expand a small card listing the shortcuts; click again, press
+ * Escape, or click anywhere outside to collapse it.
+ *
+ * The list is passed in (see UI_TEXT.shortcuts) so all user-facing wording stays
+ * in one place in the sketch.
+ */
+
+function el(tag, className, parent) {
+  const node = document.createElement(tag);
+  if (className) node.setAttribute('class', className);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+/**
+ * @param {Object} options
+ * @param {string} [options.title] - heading shown at the top of the card
+ * @param {Array} options.groups - [{ title, items: [{ keys: string[], text }] }]
+ */
+function createShortcutsOverlay(options = {}) {
+  const title = options.title || 'Shortcuts';
+  const groups = options.groups || [];
+
+  let isOpen = false;
+
+  const root = el('div', 'shortcuts-root');
+
+  // --- The card -----------------------------------------------------------
+  const card = el('div', 'shortcuts-card', root);
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-label', title);
+  card.hidden = true;
+
+  const heading = el('div', 'shortcuts-heading', card);
+  heading.textContent = title;
+
+  for (const group of groups) {
+    if (group.title) {
+      const groupTitle = el('div', 'shortcuts-group-title', card);
+      groupTitle.textContent = group.title;
+    }
+    const list = el('dl', 'shortcuts-list', card);
+    for (const item of group.items || []) {
+      const row = el('div', 'shortcuts-row', list);
+      const keysCell = el('dt', 'shortcuts-keys', row);
+      (item.keys || []).forEach((key, i) => {
+        if (i > 0) {
+          const plus = el('span', 'shortcuts-plus', keysCell);
+          plus.textContent = '+';
+        }
+        const kbd = el('kbd', 'shortcuts-key', keysCell);
+        kbd.textContent = key;
+      });
+      const label = el('dd', 'shortcuts-text', row);
+      label.textContent = item.text || '';
+    }
+  }
+
+  // --- The floating button ------------------------------------------------
+  const button = el('button', 'shortcuts-button', root);
+  button.type = 'button';
+  button.setAttribute('aria-label', title);
+  button.setAttribute('aria-expanded', 'false');
+  button.title = title;
+  // Inline SVG keeps the control self-contained (no extra asset to ship).
+  // The label sits beside it and is revealed on hover by CSS.
+  button.innerHTML =
+    '<span class="shortcuts-button-icon">' +
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+    '<rect x="2" y="6" width="20" height="13" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<path d="M6 10h1M9.5 10h1M13 10h1M16.5 10h1M6 13h1M9.5 13h1M13 13h1M16.5 13h1M8 16h8" ' +
+    'stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+    '</svg></span>' +
+    '<span class="shortcuts-button-label">' +
+    String(title).replace(/[<>&]/g, '') +
+    '</span>';
+
+  function setOpen(next) {
+    isOpen = next;
+    card.hidden = !next;
+    root.classList.toggle('is-open', next);
+    button.setAttribute('aria-expanded', next ? 'true' : 'false');
+  }
+
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!isOpen);
+  });
+
+  // Clicks inside the card should not close it.
+  card.addEventListener('click', (e) => e.stopPropagation());
+
+  function onDocumentClick() {
+    if (isOpen) setOpen(false);
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Escape' && isOpen) setOpen(false);
+  }
+
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onKeyDown);
+  document.body.appendChild(root);
+
+  return {
+    open: () => setOpen(true),
+    close: () => setOpen(false),
+    toggle: () => setOpen(!isOpen),
+    isOpen: () => isOpen,
+    dispose() {
+      document.removeEventListener('click', onDocumentClick);
+      document.removeEventListener('keydown', onKeyDown);
+      if (root.parentNode) root.remove();
     },
   };
 }
 
 module.exports = {
-  createRecorder,
+  createShortcutsOverlay,
 };
 
-},{}],7:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 const Color = require('canvas-sketch-util/color');
 const { uniteFrameLogItems } = require('./paperUnionSilhouette.js');
 
@@ -1066,7 +1313,7 @@ module.exports = {
   createSvgFrameLog,
 };
 
-},{"./paperUnionSilhouette.js":5,"canvas-sketch-util/color":10}],8:[function(require,module,exports){
+},{"./paperUnionSilhouette.js":5,"canvas-sketch-util/color":11}],9:[function(require,module,exports){
 (function (global, factory) {
   typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
   typeof define === 'function' && define.amd ? define(['exports'], factory) :
@@ -6254,9 +6501,9 @@ module.exports = {
 
 })));
 
-},{}],9:[function(require,module,exports){
-
 },{}],10:[function(require,module,exports){
+
+},{}],11:[function(require,module,exports){
 var cssColor = require('./lib/css-color');
 var names = require('./lib/css-color-names.json');
 var rgbLuminance = require('./lib/relative-luminance');
@@ -6320,7 +6567,7 @@ module.exports.RGBAToHex = RGBAToHex;
 module.exports.RGBAToHSLA = HSLUtil.RGBAToHSLA;
 module.exports.HSLAToRGBA = HSLUtil.HSLAToRGBA;
 
-},{"./lib/css-color":12,"./lib/css-color-names.json":11,"./lib/hex-to-rgba":13,"./lib/hsl":14,"./lib/relative-luminance":15,"./lib/rgba-to-hex":16}],11:[function(require,module,exports){
+},{"./lib/css-color":13,"./lib/css-color-names.json":12,"./lib/hex-to-rgba":14,"./lib/hsl":15,"./lib/relative-luminance":16,"./lib/rgba-to-hex":17}],12:[function(require,module,exports){
 module.exports={
   "aliceblue": "#f0f8ff",
   "antiquewhite": "#faebd7",
@@ -6471,7 +6718,7 @@ module.exports={
   "yellow": "#ffff00",
   "yellowgreen": "#9acd32"
 }
-},{}],12:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 
 var names = require('./css-color-names.json');
 var HSLUtil = require('./hsl');
@@ -6594,7 +6841,7 @@ function hslStyle (h, s, l, a) {
   }
 }
 
-},{"./css-color-names.json":11,"./hex-to-rgba":13,"./hsl":14,"./rgba-to-hex":16,"./wrap":17}],13:[function(require,module,exports){
+},{"./css-color-names.json":12,"./hex-to-rgba":14,"./hsl":15,"./rgba-to-hex":17,"./wrap":18}],14:[function(require,module,exports){
 module.exports = hexToRGBA;
 function hexToRGBA (str) {
   if (typeof str !== 'string') {
@@ -6632,7 +6879,7 @@ function hexToRGBA (str) {
   return [ red, green, blue, alpha ];
 }
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 var floatHSL2RGB = require('float-hsl2rgb');
 var floatRGB2HSL = require('float-rgb2hsl');
 var wrap = require('./wrap');
@@ -6660,7 +6907,7 @@ function HSLAToRGBA (hsla) {
   ];
 }
 
-},{"./wrap":17,"float-hsl2rgb":22,"float-rgb2hsl":23}],15:[function(require,module,exports){
+},{"./wrap":18,"float-hsl2rgb":23,"float-rgb2hsl":24}],16:[function(require,module,exports){
 // Extracted from @tmcw / wcag-contrast
 // https://github.com/tmcw/relative-luminance/blob/master/index.js
 
@@ -6692,7 +6939,7 @@ function relativeLuminance (rgb) {
   return r * rc + g * gc + b * bc;
 }
 
-},{}],16:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 module.exports = rgbaToHex;
 function rgbaToHex (rgba) {
   if (!rgba || !Array.isArray(rgba)) {
@@ -6713,7 +6960,7 @@ function rgbaToHex (rgba) {
   return '#' + result;
 }
 
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 module.exports = wrap;
 function wrap (value, from, to) {
   if (typeof from !== 'number' || typeof to !== 'number') {
@@ -6732,7 +6979,7 @@ function wrap (value, from, to) {
   return value - cycle * Math.floor((value - from) / cycle);
 }
 
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var defined = require('defined');
 var wrap = require('./lib/wrap');
 var EPSILON = Number.EPSILON;
@@ -6940,7 +7187,7 @@ module.exports = {
   expand4D: expandVector(4)
 };
 
-},{"./lib/wrap":17,"defined":21}],19:[function(require,module,exports){
+},{"./lib/wrap":18,"defined":22}],20:[function(require,module,exports){
 var seedRandom = require('seed-random');
 var SimplexNoise = require('simplex-noise');
 var defined = require('defined');
@@ -7270,7 +7517,7 @@ function createRandom (defaultSeed) {
 
 module.exports = createRandom();
 
-},{"defined":21,"seed-random":25,"simplex-noise":26}],20:[function(require,module,exports){
+},{"defined":22,"seed-random":26,"simplex-noise":27}],21:[function(require,module,exports){
 (function (global){(function (){
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory() :
@@ -9428,7 +9675,7 @@ module.exports = createRandom();
 
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],21:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 'use strict';
 
 module.exports = function defined() {
@@ -9439,7 +9686,7 @@ module.exports = function defined() {
 	}
 };
 
-},{}],22:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 module.exports = hsl2rgb
 function hsl2rgb (hsl) {
   var h = hsl[0],
@@ -9485,7 +9732,7 @@ function hsl2rgb (hsl) {
   return rgb
 }
 
-},{}],23:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 module.exports = rgb2hsl
 function rgb2hsl (rgb) {
   var r = rgb[0],
@@ -9525,7 +9772,7 @@ function rgb2hsl (rgb) {
   return [h / 360, s, l]
 }
 
-},{}],24:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 /*!
  * Paper.js v0.12.18 - The Swiss Army Knife of Vector Graphics Scripting.
  * http://paperjs.org/
@@ -27007,7 +27254,7 @@ if (typeof define === 'function' && define.amd) {
 return paper;
 }.call(this, typeof self === 'object' ? self : null);
 
-},{"./node/extend.js":9,"./node/self.js":9,"acorn":8}],25:[function(require,module,exports){
+},{"./node/extend.js":10,"./node/self.js":10,"acorn":9}],26:[function(require,module,exports){
 (function (global){(function (){
 'use strict';
 
@@ -27184,7 +27431,7 @@ function tostring(a) {
 mixkey(Math.random(), pool);
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],26:[function(require,module,exports){
+},{}],27:[function(require,module,exports){
 /*
  * A fast javascript implementation of simplex noise by Jonas Wagner
 
@@ -27659,7 +27906,7 @@ Better rank ordering method by Stefan Gustavson in 2012.
 
 })();
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 /*! Tweakpane 3.1.10 (c) 2016 cocopon, licensed under the MIT license. */
 (function (global, factory) {
     typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
@@ -35293,40 +35540,42 @@ Better rank ordering method by Stefan Gustavson in 2012.
 
 }));
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 "use strict";
 
 /**
  * Grid of metaballs: each cell’s circle radius comes from Perlin noise, media luma,
  * or darkness painted on an offscreen canvas while the mouse button is held (mouse trace).
  */
-const canvasSketch = require('canvas-sketch');
-const random = require('canvas-sketch-util/random');
-const math = require('canvas-sketch-util/math');
-const Tweakpane = require('tweakpane');
-const colors = require('canvas-sketch-util/color');
+const canvasSketch = require("canvas-sketch");
+const random = require("canvas-sketch-util/random");
+const math = require("canvas-sketch-util/math");
+const Tweakpane = require("tweakpane");
 const {
   createSvgFrameLog
-} = require('./modules/svgFrameLog.js');
+} = require("./modules/svgFrameLog.js");
 const {
   prepareDocument,
   createFooter
-} = require('./modules/myLib.js');
-const mediaSetup = require('./modules/mediaSetup.js');
+} = require("./modules/myLib.js");
+const mediaSetup = require("./modules/mediaSetup.js");
 const {
   createRecorder
-} = require('./modules/recording.js');
+} = require("./modules/recording.js");
 const {
   setupMouseEvents,
   setupMouseTraceInput
-} = require('./modules/events.js');
+} = require("./modules/events.js");
 const {
   drawCircle,
   drawTwoCircleMetaball
-} = require('./modules/metaballs.js');
+} = require("./modules/metaballs.js");
+const {
+  createShortcutsOverlay
+} = require("./modules/shortcutsOverlay.js");
 
 // Page layout: stylesheet, tweakpane container, wrapper for the sketch canvas.
-const [paneDiv, imgWrapper] = prepareDocument('css/styles.css');
+const [paneDiv, imgWrapper] = prepareDocument("css/styles.css");
 random.setSeed(123);
 
 // Filled in after `canvasSketch` and Tweakpane start.
@@ -35334,41 +35583,196 @@ let pane;
 let manager;
 let elCanvas;
 let mouseEvents;
-// setupMouseTraceInput API: isPointerDown(), isSKeyHeld(), dispose() — no side effects in events.
+// setupMouseTraceInput API: isPointerDown(), getPointer(), dispose() — no side effects in events.
 let mouseTraceInput;
 
-// Mouse-trace mode: pointer + S-key wiring from events module (once).
+// Mouse-trace mode: pointer wiring from events module (once).
 let mouseTracePointerListenersAttached = false;
 // Last "widthxheight" string we applied to the trace buffer; resize + clear only when it changes.
-let lastMouseTraceBufferDimensionsKey = '';
+let lastMouseTraceBufferDimensionsKey = "";
+
+// True while the MediaRecorder is running; the brush cursor is hidden so the
+// guide circles are not baked into the recorded video.
+let isRecordingVideo = false;
+// Set by createPane so the wheel handler can push its changes back to the sliders.
+let refreshBrushInputs = null;
 
 // Set by UI before exportFrame: 'clipboard' (Copy) or 'file' (download .svg).
-let svgExportDestination = 'clipboard';
+let svgExportDestination = "clipboard";
 const svgFrameLog = createSvgFrameLog();
-const ver = '1.0';
-const date = '01.04.26';
+const ver = "1.0";
+const date = "01.04.26";
+
+/**
+ * Artwork colours (the canvas itself, not the interface).
+ * The user can override both from the panel; these are only the starting values.
+ * Interface colours live in css/styles.css under BRAND PALETTE.
+ */
+/**
+ * The Tahreez brand palette — reference for the colour names used in the
+ * composition labels below. The artwork only ever uses these seven.
+ */
+const ARTWORK_PALETTE = [{
+  label: "Metallic Silver",
+  value: "#c6cbce"
+}, {
+  label: "Metallic Silver Light",
+  value: "#d0d4d7"
+}, {
+  label: "White",
+  value: "#ffffff"
+}, {
+  label: "Gray",
+  value: "#f1f1f1"
+}, {
+  label: "Core Graphite",
+  value: "#2e3d44"
+}, {
+  label: "Core Graphite Shade",
+  value: "#232e33"
+}, {
+  label: "Black",
+  value: "#000001"
+}];
+
+/**
+ * Approved colour compositions — the only shape/background pairings allowed.
+ * Transcribed from the artwork in assets/color-comps/, where each SVG's
+ * full-size rect is the background and the inner circle is the shape colour.
+ * `file` is that source SVG, used as the thumbnail in the panel, so the picker
+ * shows the approved artwork itself.
+ *
+ * To add one: drop the SVG in that folder and add a row here.
+ */
+const ARTWORK_COMPOSITIONS = [{
+  label: "Gray on White",
+  fill: "#f1f1f1",
+  background: "#ffffff",
+  file: "comp-01-gray-on-white.svg"
+}, {
+  label: "Metallic Silver Light on White",
+  fill: "#d0d4d7",
+  background: "#ffffff",
+  file: "comp-02-silver-light-on-white.svg"
+}, {
+  label: "White on Gray",
+  fill: "#ffffff",
+  background: "#f1f1f1",
+  file: "comp-03-white-on-gray.svg"
+}, {
+  label: "Metallic Silver Light on Gray",
+  fill: "#d0d4d7",
+  background: "#f1f1f1",
+  file: "comp-04-silver-light-on-gray.svg"
+}, {
+  label: "Gray on Metallic Silver Light",
+  fill: "#f1f1f1",
+  background: "#d0d4d7",
+  file: "comp-05-gray-on-silver-light.svg"
+}, {
+  label: "Metallic Silver on Metallic Silver Light",
+  fill: "#c6cbce",
+  background: "#d0d4d7",
+  file: "comp-06-silver-on-silver-light.svg"
+}, {
+  label: "Gray on Metallic Silver",
+  fill: "#f1f1f1",
+  background: "#c6cbce",
+  file: "comp-07-gray-on-silver.svg"
+}, {
+  label: "Metallic Silver Light on Metallic Silver",
+  fill: "#d0d4d7",
+  background: "#c6cbce",
+  file: "comp-08-silver-light-on-silver.svg"
+}, {
+  label: "Core Graphite Shade on Core Graphite",
+  fill: "#232e33",
+  background: "#2e3d44",
+  file: "comp-09-graphite-shade-on-graphite.svg"
+}, {
+  label: "Black on Core Graphite",
+  fill: "#000001",
+  background: "#2e3d44",
+  file: "comp-10-black-on-graphite.svg"
+}, {
+  label: "Core Graphite on Core Graphite Shade",
+  fill: "#2e3d44",
+  background: "#232e33",
+  file: "comp-11-graphite-on-graphite-shade.svg"
+}, {
+  label: "Black on Core Graphite Shade",
+  fill: "#000001",
+  background: "#232e33",
+  file: "comp-12-black-on-graphite-shade.svg"
+}, {
+  label: "Core Graphite on Black",
+  fill: "#2e3d44",
+  background: "#000001",
+  file: "comp-13-graphite-on-black.svg"
+}, {
+  label: "Core Graphite Shade on Black",
+  fill: "#232e33",
+  background: "#000001",
+  file: "comp-14-graphite-shade-on-black.svg"
+}];
+const COMPOSITIONS_DIR = "assets/color-comps/";
+
+/**
+ * Mac keyboards label this key Option, Windows and Linux label it Alt.
+ * Used in the shortcut list and tooltips so the panel matches the keyboard.
+ */
+const ALT_KEY_NAME = /Mac|iPad|iPhone/.test(typeof navigator !== "undefined" && (navigator.platform || navigator.userAgent) || "") ? "Option" : "Alt";
+
+/** Look a composition up by name, so reordering the list cannot move the default. */
+const composition = label => ARTWORK_COMPOSITIONS.find(c => c.label === label);
+
+// comp-02 in assets/color-comps/. Looked up by name so the list can be
+// reordered without silently changing which composition starts selected.
+const DEFAULT_COMPOSITION = composition("Metallic Silver Light on White");
+const ARTWORK_COLORS = {
+  shapes: DEFAULT_COMPOSITION.fill,
+  background: DEFAULT_COMPOSITION.background
+};
 
 // Tweakpane-editable sketch controls (also read by media/recording modules).
 const params = {
-  fill: '#000000',
-  background: '#ffffff',
+  fill: ARTWORK_COLORS.shapes,
+  background: ARTWORK_COLORS.background,
   // Default media paths (image / video) for mediaSetup.
-  source: 'v',
-  path: '4.jpg',
-  pathV: '2.mp4',
-  // Square canvas edge when size source is noise or mouse trace.
-  canvW: 1000,
+  source: "v",
+  path: "4.jpg",
+  pathV: "2.mp4",
+  // Export canvas size for the noise and mouse-trace sources (media derives its
+  // own size from the file's aspect ratio). The on-screen preview is scaled down
+  // to fit; these are the pixel dimensions that exports actually use.
+  canvasWidth: 1000,
+  canvasHeight: 1000,
   mCanvFactor: 1,
   // Pointer position in sketch space, 0…1 (updated by events module).
   cx: 0.5,
   cy: 0.5,
   // Grid density and radius mapping.
   cols: 40,
-  sizeSource: 'media',
+  sizeSource: "media",
   // 'mouseTrace', 'media', 'noise'
+  // Random-pattern (Perlin noise) field controls; only used when sizeSource === 'noise'.
+  noiseScale: 0.02,
+  noiseSpeed: 0.09,
+  noiseDetail: 0.08,
+  noiseSeed: 123,
+  // Brush controls; only used when sizeSource === 'mouseTrace'.
+  brushMode: "brush",
+  // 'brush' (paint shapes) | 'eraser' (remove them)
+  brushStrength: 0.5,
+  // 0…1 slider; curved to opacity by brushAlpha()
+  brushSize: 0.2,
+  // radius as a fraction of the trace canvas width
+  brushFeather: 0.5,
+  // 0 = hard edge, 1 = falloff starts at the centre
   minRFactor: 0,
   maxRFactor: 0.8,
-  falloff: 4,
+  falloff: 1,
+  // 0…1 slider; mapped to the 2…4 exponent by falloffExponent()
   // Post-process when sampling media as the field (Canvas 2D filter chain).
   mediaBlur: 0,
   mediaBrightness: 1,
@@ -35382,12 +35786,288 @@ const params = {
   effect: true
 };
 
+/**
+ * ---------------------------------------------------------------------------
+ * PANEL TEXT — edit here to change what the user sees.
+ * `label` is the name shown in the panel; `tip` is the hover tooltip.
+ * Keep tips to one or two short sentences; they appear as a plain browser tooltip.
+ * ---------------------------------------------------------------------------
+ */
+const UI_TEXT = {
+  // Folder titles — a single noun; the controls inside supply the detail.
+  folders: {
+    source: "Source settings",
+    general: "General settings",
+    image: "Image settings",
+    noise: "Pattern settings",
+    brush: "Brush settings",
+    colour: "Colour settings",
+    // These two hold actions rather than settings, so they keep plain names.
+    output: "Export"
+  },
+  // Buttons
+  upload: {
+    label: "Upload",
+    tip: "Load an image or video from your computer. The artwork takes its size and shape from the file."
+  },
+  clear: {
+    label: "Clear (C)",
+    tip: "Wipe the canvas back to blank and start drawing again. Shortcut: C."
+  },
+  copySvg: {
+    label: "Copy to Illustrator",
+    tip: "Copy the artwork as vectors, ready to paste straight into Adobe Illustrator."
+  },
+  exportSvg: {
+    label: "Download SVG",
+    tip: "Download the artwork as an SVG vector file, at the canvas size set above."
+  },
+  record: {
+    label: "Record",
+    tip: "Record the animation as a video file, at the canvas size set above. Press again to stop."
+  },
+  // Controls
+  sizeSource: {
+    label: "Base",
+    tip: "What the shapes are made from: an image or video, a random pattern, or your own drawing. Shortcut: M cycles through them.",
+    // Single source of truth: builds the dropdown and sets the order the
+    // M shortcut cycles through.
+    options: [{
+      value: "noise",
+      label: "Random pattern"
+    }, {
+      value: "media",
+      label: "Image or video"
+    }, {
+      value: "mouseTrace",
+      label: "Draw with mouse"
+    }]
+  },
+  composition: {
+    label: "Colour composition",
+    tip: "Approved pairings of shape and background colour. Hover a swatch to see its name."
+  },
+  canvasWidth: {
+    label: "Width",
+    tip: "Width of the artwork in pixels. The preview is scaled to fit; exports come out at this size."
+  },
+  canvasHeight: {
+    label: "Height",
+    tip: "Height of the artwork in pixels. The preview is scaled to fit; exports come out at this size."
+  },
+  cols: {
+    label: "Detail",
+    tip: "How many shapes fill the canvas. Higher gives smaller, finer shapes."
+  },
+  mediaBlur: {
+    label: "Blur",
+    tip: "Softens the image before it is traced, giving smoother and simpler shapes."
+  },
+  mediaBrightness: {
+    label: "Brightness",
+    tip: "Brightens or darkens the image. Darker areas become larger shapes."
+  },
+  mediaContrast: {
+    label: "Contrast",
+    tip: "Separates light from dark — the quickest way to make your subject stand out."
+  },
+  mediaInvert: {
+    label: "Invert",
+    tip: "Swaps light and dark, so shapes form in the opposite areas."
+  },
+  noiseScale: {
+    label: "Scale",
+    tip: "How large the blobs of the random pattern are. Lower gives bigger, calmer shapes."
+  },
+  noiseSpeed: {
+    label: "Speed",
+    tip: "How fast the pattern moves. Set to zero to freeze it into a still image."
+  },
+  noiseDetail: {
+    label: "Texture",
+    tip: "Adds finer grain on top of the pattern. Higher makes it busier and more broken up."
+  },
+  falloff: {
+    label: "Threshold",
+    tip: "How much of the canvas fills with shapes. Higher keeps only the strongest areas, leaving fewer, bolder shapes."
+  },
+  newSeed: {
+    label: "Shuffle",
+    tip: "Reshuffles the pattern for a completely different random result."
+  },
+  brushTool: {
+    label: "Brush (B)",
+    tip: "Paint shapes onto the canvas. Shortcut: B."
+  },
+  eraserTool: {
+    label: "Eraser (E)",
+    tip: "Rub shapes away again. Shortcut: E."
+  },
+  brushStrength: {
+    label: "Strength",
+    tip: "How much each stroke builds up. Higher fills in faster. Shortcut: Shift + mouse wheel."
+  },
+  brushSize: {
+    label: "Size",
+    tip: "How wide the brush is. Shortcut: mouse wheel over the canvas."
+  },
+  brushFeather: {
+    label: "Feather",
+    tip: "How soft the brush edge is. Lower is crisp, higher fades out gently. Shortcut: " + ALT_KEY_NAME + " + mouse wheel."
+  },
+  // Floating shortcuts card, bottom-right of the page.
+  shortcuts: {
+    title: "Shortcuts",
+    groups: [{
+      title: "Source",
+      items: [{
+        keys: ["M"],
+        text: "Switch between sources"
+      }]
+    }, {
+      title: "Drawing",
+      items: [{
+        keys: ["B"],
+        text: "Brush"
+      }, {
+        keys: ["E"],
+        text: "Eraser"
+      }, {
+        keys: ["C"],
+        text: "Clear the drawing"
+      }]
+    }, {
+      title: "Brush size & feel",
+      items: [{
+        keys: ["Wheel"],
+        text: "Brush size"
+      }, {
+        keys: ["Shift", "Wheel"],
+        text: "Brush strength"
+      }, {
+        keys: [ALT_KEY_NAME, "Wheel"],
+        text: "Feather"
+      }]
+    }, {
+      title: "Canvas",
+      items: [{
+        keys: ["Shift", "Drag"],
+        text: "Draw a straight line"
+      }]
+    }]
+  },
+  effect: {
+    label: "Show effect",
+    tip: "Turn off to see your original image or drawing without the shapes on top."
+  }
+};
+
+/**
+ * Native browser tooltip on a Tweakpane control or button.
+ * Tweakpane 3 has no tooltip API, but every binding exposes its root `element`.
+ */
+function setTooltip(binding, tip) {
+  if (binding && binding.element && tip) binding.element.title = tip;
+  return binding;
+}
+
 // Initial canvas-sketch run: square canvas under `imgWrapper`.
 const settings = {
-  dimensions: [params.canvW, params.canvW],
+  dimensions: [params.canvasWidth, params.canvasHeight],
   parent: imgWrapper,
-  animate: true
+  animate: true,
+  // Preview renders at the size it is displayed at (capped to fit the area,
+  // aspect ratio preserved), while props.width/height stay at the dimensions
+  // above. canvas-sketch forces this off while exporting, so SVG and video
+  // come out at the full canvas size the user asked for.
+  scaleToView: true
 };
+
+/**
+ * ---------------------------------------------------------------------------
+ * BRUSH STRENGTH FEEL — the three numbers to tune if the brush is too strong
+ * or too weak. The Strength slider is 0…1; brushAlpha() maps it to the opacity
+ * painted per frame.
+ *
+ * Paint is stamped once per animation frame while the button is held, so
+ * opacity compounds: at 60fps, alpha 0.01 already covers ~26% in half a second.
+ * That is why the whole range must sit at very low alpha values.
+ *
+ *   BRUSH_MIN_ALPHA  what slider 0 does — LOWER THIS if the gentlest brush
+ *                    still feels too strong. Try 0.0005.
+ *   BRUSH_MAX_ALPHA  what slider 1 does — raise for a punchier top end.
+ *                    Above ~0.2 the top of the slider all feels instant.
+ *   BRUSH_CURVE      how the range is distributed. 1 = linear (most of the
+ *                    slider too strong). Higher pushes finer control towards
+ *                    the low end: 2 gentle, 3 current, 4–5 very fine.
+ *
+ * Coverage after 0.5s of holding = 1 - (1 - alpha) ^ 30.
+ * ---------------------------------------------------------------------------
+ */
+const BRUSH_MIN_ALPHA = 0.01; //0.0015
+const BRUSH_MAX_ALPHA = 0.15;
+const BRUSH_CURVE = 3;
+// Falloff is shown as a 0…1 slider, but only 2…4 is useful as the exponent:
+// below 2 almost every cell grows a shape, above 4 only the strongest survive.
+const FALLOFF_MIN = 2;
+const FALLOFF_MAX = 4;
+
+/** Falloff slider (0…1) → the exponent that shapes the field-to-radius curve. */
+function falloffExponent(amount01) {
+  const t = Math.min(1, Math.max(0, amount01));
+  return FALLOFF_MIN + t * (FALLOFF_MAX - FALLOFF_MIN);
+}
+
+// Longest edge of the offscreen drawing buffer. The field is sampled once per
+// grid cell, so going beyond this only costs getImageData time.
+const MOUSE_TRACE_BUFFER_MAX = 1400;
+// Shared by the Size slider and the mouse wheel so the two cannot disagree.
+const BRUSH_SIZE_MIN = 0.02;
+const BRUSH_SIZE_MAX = 0.6;
+// Wheel sensitivity, tuned so a full sweep takes a similar spin either way:
+// ~17 notches for the 0…1 controls, ~15 for size.
+const WHEEL_STEP_01 = 0.0006;
+const WHEEL_STEP_SIZE = 0.0004;
+
+/** Strength slider (0…1) → per-frame paint opacity. See BRUSH_* knobs above. */
+function brushAlpha(strength01) {
+  const t = Math.min(1, Math.max(0, strength01));
+  return BRUSH_MIN_ALPHA + Math.pow(t, BRUSH_CURVE) * (BRUSH_MAX_ALPHA - BRUSH_MIN_ALPHA);
+}
+
+/**
+ * Brush cursor guide: outer ring is the brush edge, inner ring is where the
+ * feathered falloff begins. Drawn twice — dark under light — so it stays visible
+ * on any artwork colour. Screen furniture only: never part of an export.
+ */
+function drawBrushCursor(context, width, height, pointer) {
+  const cx = pointer.x * width;
+  const cy = pointer.y * height;
+  const outerRadius = width * params.brushSize;
+  // brushFeather 0 = hard edge (rings coincide), 1 = fades from the centre (no inner ring).
+  const innerRadius = outerRadius * (1 - params.brushFeather);
+  const erasing = params.brushMode === "eraser";
+  const ring = (radius, dashed) => {
+    if (radius <= 0.5) return;
+    context.setLineDash(dashed ? [width * 0.008, width * 0.008] : []);
+    context.beginPath();
+    context.arc(cx, cy, radius, 0, Math.PI * 2);
+    // Dark halo first, then the light stroke on top.
+    context.lineWidth = 3;
+    context.strokeStyle = "rgba(0,0,0,0.45)";
+    context.stroke();
+    context.lineWidth = 1.5;
+    context.strokeStyle = erasing ? "rgba(255,120,120,0.95)" : "rgba(255,255,255,0.95)";
+    context.stroke();
+  };
+  context.save();
+  // Outer solid = brush edge; inner dashed = where the feather starts.
+  ring(outerRadius, false);
+  // At feather 0 the two rings coincide; at feather 1 the inner one collapses
+  // to a point. Either way the radius guard inside ring() skips it.
+  if (params.brushFeather > 0.02) ring(innerRadius, true);
+  context.restore();
+}
 
 /** Sample RGB from packed ImageData at integer (x, y); `pixels` is getImageData().data. */
 function getColor(x, y, pixels, canvasWidth) {
@@ -35413,7 +36093,22 @@ const sketch = ({
   }
   if (!mouseTracePointerListenersAttached) {
     mouseTraceInput = setupMouseTraceInput({
-      canvas: elCanvas
+      canvas: elCanvas,
+      // Wheel adjusts the brush: plain = size, Alt = feather, Shift = strength.
+      // Ignored in other modes so the page still scrolls normally there.
+      onWheel: (delta, mods) => {
+        if (params.sizeSource !== "mouseTrace") return false;
+        const clamp01 = v => Math.min(1, Math.max(0, v));
+        if (mods.altKey) {
+          params.brushFeather = clamp01(params.brushFeather - delta * WHEEL_STEP_01);
+        } else if (mods.shiftKey) {
+          params.brushStrength = clamp01(params.brushStrength - delta * WHEEL_STEP_01);
+        } else {
+          params.brushSize = Math.min(BRUSH_SIZE_MAX, Math.max(BRUSH_SIZE_MIN, params.brushSize - delta * WHEEL_STEP_SIZE));
+        }
+        if (refreshBrushInputs) refreshBrushInputs();
+        return true;
+      }
     });
     mouseTracePointerListenersAttached = true;
   }
@@ -35451,13 +36146,15 @@ const sketch = ({
       const maxR = cellSize * params.maxRFactor;
       const minR = cellSize * params.minRFactor;
       const circles = new Array(cols * rows);
-      const noiseScale = 0.02;
-      const timeScale = 0.09;
-      const frequency = 0.08;
+      const noiseScale = params.noiseScale;
+      const timeScale = params.noiseSpeed;
+      const frequency = params.noiseDetail;
       const amplitude = 1;
       let pixels = null;
-      const useMediaForSize = params.sizeSource === 'media' && mediaSetup.state.media;
-      const useMouseTraceForSize = params.sizeSource === 'mouseTrace';
+      const useMediaForSize = params.sizeSource === "media" && mediaSetup.state.media;
+      const useMouseTraceForSize = params.sizeSource === "mouseTrace";
+      // Noise is the fallback too: media mode with no file loaded lands here.
+      const usingNoiseField = !useMediaForSize && !useMouseTraceForSize;
 
       // Build a scalar field in `pixels` (RGBA buffer) sampled per cell below.
       if (useMediaForSize) {
@@ -35469,7 +36166,7 @@ const sketch = ({
         mediaContext.imageSmoothingEnabled = false;
         mediaContext.filter = `blur(${params.mediaBlur}px) brightness(${params.mediaBrightness}) contrast(${params.mediaContrast}) invert(${params.mediaInvert})`;
         mediaContext.drawImage(ms.media, 0, 0, mediaCanvas.width, mediaCanvas.height);
-        mediaContext.filter = 'none';
+        mediaContext.filter = "none";
         pixels = mediaContext.getImageData(0, 0, mediaCanvas.width, mediaCanvas.height).data;
       }
 
@@ -35484,28 +36181,36 @@ const sketch = ({
         // mediaContext.fillStyle = 'rgb(255,255,255,0.01)';
         // mediaContext.fillRect(0, 0, mediaCanvas.width, mediaCanvas.height);
 
-        const sketchDimensionsKey = `${width}x${height}`;
+        // The buffer is read back with getImageData every frame and then sampled
+        // only once per grid cell (at most `cols` across), so matching a large
+        // export canvas would cost millions of pixels a frame for detail that is
+        // never sampled. Cap the long edge and keep the aspect ratio.
+        const traceScale = Math.min(1, MOUSE_TRACE_BUFFER_MAX / Math.max(width, height));
+        const traceWidth = Math.max(1, Math.round(width * traceScale));
+        const traceHeight = Math.max(1, Math.round(height * traceScale));
+        const sketchDimensionsKey = `${traceWidth}x${traceHeight}`;
         if (lastMouseTraceBufferDimensionsKey !== sketchDimensionsKey) {
           lastMouseTraceBufferDimensionsKey = sketchDimensionsKey;
-          mediaCanvas.width = width;
-          mediaCanvas.height = height;
-          mediaContext.fillStyle = '#ffffff';
+          mediaCanvas.width = traceWidth;
+          mediaCanvas.height = traceHeight;
+          mediaContext.fillStyle = "#ffffff";
           mediaContext.fillRect(0, 0, mediaCanvas.width, mediaCanvas.height);
         }
 
-        // Paint under cursor: black by default; white while S is held (both need pointer down).
+        // Paint under cursor: black adds shapes, white erases them.
         if (mouseTraceInput.isPointerDown()) {
           const gradientCenterX = params.cx * mediaCanvas.width;
           const gradientCenterY = params.cy * mediaCanvas.height;
-          const brushRadius = mediaCanvas.width * 0.2;
+          const brushRadius = mediaCanvas.width * params.brushSize;
           const radialGradient = mediaContext.createRadialGradient(gradientCenterX, gradientCenterY, 0, gradientCenterX, gradientCenterY, brushRadius);
-          if (mouseTraceInput.isSKeyHeld()) {
-            radialGradient.addColorStop(0, 'rgba(255,255,255,0.1)');
-            radialGradient.addColorStop(1, 'rgba(255,255,255,0)');
-          } else {
-            radialGradient.addColorStop(0, 'rgba(0,0,0,0.1)');
-            radialGradient.addColorStop(1, 'rgba(0,0,0,0)');
-          }
+          const erasing = params.brushMode === "eraser";
+          const rgb = erasing ? "255,255,255" : "0,0,0";
+          const alpha = brushAlpha(params.brushStrength);
+          // Feather moves the solid core outwards: 0 keeps a hard edge, 1 fades from the centre.
+          const solidStop = 1 - params.brushFeather;
+          radialGradient.addColorStop(0, `rgba(${rgb},${alpha})`);
+          if (solidStop > 0) radialGradient.addColorStop(solidStop, `rgba(${rgb},${alpha})`);
+          radialGradient.addColorStop(1, `rgba(${rgb},0)`);
           mediaContext.fillStyle = radialGradient;
           mediaContext.fillRect(gradientCenterX - brushRadius, gradientCenterY - brushRadius, brushRadius * 2, brushRadius * 2);
         }
@@ -35529,12 +36234,15 @@ const sketch = ({
             const n = random.noise3D(x * noiseScale, y * noiseScale, frame * timeScale, frequency, amplitude);
             fieldValue01 = math.mapRange(n, -1, 1, 0, 1, true);
           }
-          const afterFalloff = Math.pow(fieldValue01, params.falloff * 0.5);
+          const afterFalloff = Math.pow(fieldValue01, falloffExponent(params.falloff) * 0.5);
           const r = minR + afterFalloff * (maxR - minR);
+
+          // `field` is kept so "Show effect: off" can draw the raw field.
           circles[ix + iy * cols] = {
             x,
             y,
-            r
+            r,
+            field: fieldValue01
           };
         }
       }
@@ -35564,23 +36272,60 @@ const sketch = ({
       if (props.exporting && !props.recording) {
         const data = svgFrameLog.toSvgString(props, {
           unite: true,
-          // Clipboard: vectors only; downloaded file includes white background rect.
-          ...(svgExportDestination === 'clipboard' ? {} : {
-            backgroundFill: '#ffffff'
+          // Clipboard: vectors only; downloaded file keeps the chosen background.
+          ...(svgExportDestination === "clipboard" ? {} : {
+            backgroundFill: params.background
           })
         });
-        if (svgExportDestination === 'clipboard') {
-          navigator.clipboard.writeText(data);
-          return [''];
+        if (svgExportDestination === "clipboard") {
+          // The Clipboard API only exists on https or localhost. Served over
+          // plain http this is undefined, so say what to do instead of throwing.
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(data).catch(() => {
+              window.alert("Could not copy to the clipboard. Use Download SVG instead.");
+            });
+          } else {
+            window.alert("Copying needs a secure connection (https). Use Download SVG instead.");
+          }
+          return [""];
         }
         return [{
           data,
-          extension: '.svg',
-          prefix: 'tahreez'
+          extension: ".svg",
+          prefix: "tahreez"
         }];
       }
       if (!params.effect) {
-        context.drawImage(mediaSetup.mediaCanvas, 0, 0, width, height);
+        if (usingNoiseField) {
+          // There is no source image to fall back on for the random pattern, so
+          // draw the field itself: one flat cell per grid cell, which reads as a
+          // pixelated grayscale noise map at the same resolution the shapes use.
+          // Inverted to match the media convention — dark means a bigger shape.
+          for (let i = 0; i < circles.length; i++) {
+            const cell = circles[i];
+            const level = Math.round((1 - cell.field) * 255);
+            context.fillStyle = `rgb(${level},${level},${level})`;
+            context.fillRect(i % cols * cellSize, Math.floor(i / cols) * cellSize,
+            // Overdraw slightly so no seams show between neighbouring cells.
+            cellSize + 1, cellSize + 1);
+          }
+        } else {
+          context.drawImage(mediaSetup.mediaCanvas, 0, 0, width, height);
+        }
+      }
+
+      // Brush guide last, on top of everything, and never while recording.
+      if (useMouseTraceForSize && !isRecordingVideo && mouseTraceInput) {
+        const pointer = mouseTraceInput.getPointer();
+        // While painting, follow params.cx/cy — the exact spot the brush stamps,
+        // which keeps tracking even if the drag leaves the canvas.
+        const drawing = mouseTraceInput.isPointerDown();
+        if (pointer.isOver || drawing) {
+          drawBrushCursor(context, width, height, drawing ? {
+            x: params.cx,
+            y: params.cy
+          } : pointer);
+        }
       }
     }
   };
@@ -35591,169 +36336,352 @@ function createPane() {
   pane = new Tweakpane.Pane({
     container: paneDiv
   });
-  const addSep = (folder, count = 4) => {
-    for (let i = 0; i < count; i++) {
-      folder.addSeparator();
-    }
-  };
 
   // Reload sketch with dimensions from params or from loaded media aspect ratio.
   const loadAndRun = () => {
     if (!manager) return;
-    if (params.sizeSource === 'media' && mediaSetup.state.media) {
+    if (params.sizeSource === "media" && mediaSetup.state.media) {
       manager.loadAndRun(sketch, mediaSetup.getMediaDimensionsFromCurrentMedia(params));
       return;
     }
     manager.loadAndRun(sketch, {
-      dimensions: [params.canvW, params.canvW]
+      dimensions: [params.canvasWidth, params.canvasHeight]
     });
   };
 
   // Switching field source may require a new canvas size (media matches file; noise/trace use square slider).
   const onSizeSourceChange = () => {
     if (!manager) return;
-    if (params.sizeSource === 'noise') {
+    if (params.sizeSource === "noise") {
       manager.loadAndRun(sketch, {
-        dimensions: [params.canvW, params.canvW]
+        dimensions: [params.canvasWidth, params.canvasHeight]
       });
       return;
     }
-    if (params.sizeSource === 'mouseTrace') {
+    if (params.sizeSource === "mouseTrace") {
       manager.loadAndRun(sketch, {
-        dimensions: [params.canvW, params.canvW]
+        dimensions: [params.canvasWidth, params.canvasHeight]
       });
       return;
     }
-    if (params.sizeSource === 'media' && mediaSetup.state.media) {
+    if (params.sizeSource === "media" && mediaSetup.state.media) {
       const settings2 = mediaSetup.getMediaDimensionsFromCurrentMedia(params);
       manager.loadAndRun(sketch, settings2);
     }
   };
 
+  // Assigned when the dropdown is created below.
+  let sizeSourceBinding;
+
   // After programmatically setting sizeSource (e.g. file picker), refresh the dropdown display.
   const syncSizeSourceInput = () => {
-    const sourceBinding = pane.children.find(c => c.label === 'size source');
-    if (sourceBinding && typeof sourceBinding.refresh === 'function') sourceBinding.refresh();
+    if (sizeSourceBinding && typeof sizeSourceBinding.refresh === "function") sizeSourceBinding.refresh();
   };
-  let mediaBlurBinding;
-  let mediaBrightnessBinding;
-  let mediaContrastBinding;
-  let mediaInvertBinding;
-  const syncMediaPostControlsVisibility = () => {
-    const show = params.sizeSource === 'media';
-    if (mediaBlurBinding) mediaBlurBinding.hidden = !show;
-    if (mediaBrightnessBinding) mediaBrightnessBinding.hidden = !show;
-    if (mediaContrastBinding) mediaContrastBinding.hidden = !show;
-    if (mediaInvertBinding) mediaInvertBinding.hidden = !show;
+
+  /**
+   * Mode-dependent UI: every control that only makes sense for some shape
+   * sources registers here with the sources it belongs to. `syncVisibility`
+   * then shows exactly the relevant ones and hides the rest.
+   * Register folders too — a folder whose contents are all hidden should go.
+   */
+  const modeScopedItems = [];
+  const showFor = (item, ...sources) => {
+    if (item) modeScopedItems.push({
+      item,
+      sources
+    });
+    return item;
   };
-  pane.addButton({
-    title: 'Upload'
-  }).on('click', () => mediaSetup.inputMedia.click());
-  pane.addInput(params, 'sizeSource', {
-    label: 'Input Source',
-    options: {
-      Noise: 'noise',
-      Media: 'media',
-      MouseTrace: 'mouseTrace'
+  const syncVisibility = () => {
+    for (const {
+      item,
+      sources
+    } of modeScopedItems) {
+      item.hidden = !sources.includes(params.sizeSource);
     }
-  }).on('change', () => {
+  };
+
+  // Floating shortcuts card, bottom-right; wording lives in UI_TEXT.shortcuts.
+  createShortcutsOverlay({
+    title: UI_TEXT.shortcuts.title,
+    groups: UI_TEXT.shortcuts.groups
+  });
+
+  // --- Source: where the shapes come from -------------------------------
+  const sourceFolder = pane.addFolder({
+    title: UI_TEXT.folders.source
+  });
+  sizeSourceBinding = setTooltip(sourceFolder.addInput(params, "sizeSource", {
+    label: UI_TEXT.sizeSource.label,
+    // Tweakpane wants { label: value }; build it from UI_TEXT.
+    options: UI_TEXT.sizeSource.options.reduce((acc, o) => Object.assign(acc, {
+      [o.label]: o.value
+    }), {})
+  }).on("change", () => {
     onSizeSourceChange();
-    syncMediaPostControlsVisibility();
+    syncVisibility();
+  }), UI_TEXT.sizeSource.tip);
+  // Uploading only applies to the image/video source.
+  showFor(setTooltip(sourceFolder.addButton({
+    title: UI_TEXT.upload.label
+  }).on("click", () => mediaSetup.inputMedia.click()), UI_TEXT.upload.tip), "media");
+  // Wipe the drawing buffer back to white. Shared by the button and the C key.
+  const clearDrawing = () => {
+    mediaSetup.clearMediaCanvas();
+    if (manager) manager.render();
+  };
+
+  // There is only something to clear when the user is drawing.
+  showFor(setTooltip(sourceFolder.addButton({
+    title: UI_TEXT.clear.label
+  }).on("click", clearDrawing), UI_TEXT.clear.tip), "mouseTrace");
+
+  // --- Shape: geometry of the generated form ----------------------------
+  // --- General: shape detail plus canvas size ---------------------------
+  const generalFolder = pane.addFolder({
+    title: UI_TEXT.folders.general
   });
-  pane.addInput(params, 'fill', {
-    label: 'Fill'
-  });
-  pane.addInput(params, 'background', {
-    label: 'Background'
-  });
-  // pane.addInput(params, 'cx', { min: 0, max: 1, step: 0.001 });
-  // pane.addInput(params, 'cy', { min: 0, max: 1, step: 0.001 });
-  pane.addInput(params, 'cols', {
+  setTooltip(generalFolder.addInput(params, "cols", {
     min: 2,
     max: 80,
     step: 1,
-    label: 'Grid Density'
-  }).on('change', loadAndRun);
-  // pane.addInput(params, 'minRFactor', {
-  //   min: 0, max: 1.5, step: 0.05, label: 'Min Size'
-  // }).on('change', loadAndRun);
-  pane.addInput(params, 'maxRFactor', {
-    min: 0.1,
-    max: 1.5,
-    step: 0.05,
-    label: 'Max Size'
-  }).on('change', loadAndRun);
-  addSep(pane, 10);
-  syncMediaPostControlsVisibility();
-  pane.addInput(params, 'viscosity', {
-    min: 0.3,
-    max: 0.7,
-    step: 0.01,
-    label: 'Viscosity'
-  });
-  pane.addInput(params, 'falloff', {
-    min: 0.2,
-    max: 4,
-    step: 0.05,
-    label: 'Falloff'
-  }).on('change', loadAndRun);
-  // pane.addInput(params, 'handleRate', { min: 0.5, max: 4.0, step: 0.1, label: 'Handle Rate' });
-  pane.addInput(params, 'maxDistanceFactor', {
-    min: 0,
-    max: 0.35,
-    step: 0.02,
-    label: 'Max gap'
-  });
-  addSep(pane, 10);
-  mediaBlurBinding = pane.addInput(params, 'mediaBlur', {
-    min: 0,
-    max: 20,
-    step: 0.1,
-    label: 'Blur'
-  });
-  mediaBrightnessBinding = pane.addInput(params, 'mediaBrightness', {
-    min: 0,
-    max: 2,
-    step: 0.01,
-    label: 'Brightness'
-  });
-  mediaContrastBinding = pane.addInput(params, 'mediaContrast', {
-    min: 0,
-    max: 3,
-    step: 0.01,
-    label: 'Contrast'
-  });
-  mediaInvertBinding = pane.addInput(params, 'mediaInvert', {
+    label: UI_TEXT.cols.label
+  }).on("change", loadAndRun), UI_TEXT.cols.tip);
+  setTooltip(generalFolder.addInput(params, "falloff", {
     min: 0,
     max: 1,
     step: 0.01,
-    label: 'Invert'
+    label: UI_TEXT.falloff.label
+  }), UI_TEXT.falloff.tip);
+
+  // Canvas size applies to the generated sources only — media takes its size
+  // from the file — so these two hide rather than the whole folder.
+  showFor(setTooltip(generalFolder.addInput(params, "canvasWidth", {
+    min: 200,
+    max: 4000,
+    step: 10,
+    label: UI_TEXT.canvasWidth.label
+  }).on("change", loadAndRun), UI_TEXT.canvasWidth.tip), "noise", "mouseTrace");
+  showFor(setTooltip(generalFolder.addInput(params, "canvasHeight", {
+    min: 200,
+    max: 4000,
+    step: 10,
+    label: UI_TEXT.canvasHeight.label
+  }).on("change", loadAndRun), UI_TEXT.canvasHeight.tip), "noise", "mouseTrace");
+  setTooltip(generalFolder.addInput(params, "effect", {
+    label: UI_TEXT.effect.label
+  }), UI_TEXT.effect.tip);
+
+  // --- Image adjustments: only meaningful in media mode -----------------
+  const imageFolder = pane.addFolder({
+    title: UI_TEXT.folders.image
   });
-  addSep(pane, 10);
-  pane.addInput(params, 'effect', {
-    label: 'Effect'
+  setTooltip(imageFolder.addInput(params, "mediaBlur", {
+    min: 0,
+    max: 20,
+    step: 0.1,
+    label: UI_TEXT.mediaBlur.label
+  }), UI_TEXT.mediaBlur.tip);
+  setTooltip(imageFolder.addInput(params, "mediaBrightness", {
+    min: 0,
+    max: 2,
+    step: 0.01,
+    label: UI_TEXT.mediaBrightness.label
+  }), UI_TEXT.mediaBrightness.tip);
+  setTooltip(imageFolder.addInput(params, "mediaContrast", {
+    min: 0,
+    max: 3,
+    step: 0.01,
+    label: UI_TEXT.mediaContrast.label
+  }), UI_TEXT.mediaContrast.tip);
+  setTooltip(imageFolder.addInput(params, "mediaInvert", {
+    min: 0,
+    max: 1,
+    step: 0.01,
+    label: UI_TEXT.mediaInvert.label
+  }), UI_TEXT.mediaInvert.tip);
+
+  // The whole folder is irrelevant outside media mode; hide it with its contents.
+  showFor(imageFolder, "media");
+
+  // --- Pattern adjustments: only meaningful for the random pattern ------
+  const noiseFolder = pane.addFolder({
+    title: UI_TEXT.folders.noise
+  });
+  setTooltip(noiseFolder.addInput(params, "noiseScale", {
+    min: 0.002,
+    max: 0.05,
+    step: 0.001,
+    label: UI_TEXT.noiseScale.label
+  }), UI_TEXT.noiseScale.tip);
+  setTooltip(noiseFolder.addInput(params, "noiseSpeed", {
+    min: 0,
+    max: 0.4,
+    step: 0.01,
+    label: UI_TEXT.noiseSpeed.label
+  }), UI_TEXT.noiseSpeed.tip);
+  setTooltip(noiseFolder.addInput(params, "noiseDetail", {
+    min: 0.02,
+    max: 0.2,
+    step: 0.001,
+    label: UI_TEXT.noiseDetail.label
+  }), UI_TEXT.noiseDetail.tip);
+  // Reseeding gives a different pattern from the same settings.
+  setTooltip(noiseFolder.addButton({
+    title: UI_TEXT.newSeed.label
+  }).on("click", () => {
+    params.noiseSeed = Math.floor(random.value() * 100000);
+    random.setSeed(params.noiseSeed);
+    if (manager) manager.render();
+  }), UI_TEXT.newSeed.tip);
+  showFor(noiseFolder, "noise");
+
+  // --- Brush: only meaningful when drawing by hand ----------------------
+  const brushFolder = pane.addFolder({
+    title: UI_TEXT.folders.brush
   });
 
-  //add tweakpane pane gap
-  addSep(pane, 10);
-  pane.addButton({
-    title: 'Clear media canvas'
-  }).on('click', () => {
-    mediaSetup.clearMediaCanvas();
-    if (manager) manager.render();
+  // Tweakpane 3 has no toggle button, so the active tool is marked in the title.
+  const brushToolBtn = brushFolder.addButton({
+    title: UI_TEXT.brushTool.label
   });
+  const eraserToolBtn = brushFolder.addButton({
+    title: UI_TEXT.eraserTool.label
+  });
+  setTooltip(brushToolBtn, UI_TEXT.brushTool.tip);
+  setTooltip(eraserToolBtn, UI_TEXT.eraserTool.tip);
+  const syncBrushMode = () => {
+    const erasing = params.brushMode === "eraser";
+    brushToolBtn.title = erasing ? UI_TEXT.brushTool.label : `● ${UI_TEXT.brushTool.label}`;
+    eraserToolBtn.title = erasing ? `● ${UI_TEXT.eraserTool.label}` : UI_TEXT.eraserTool.label;
+  };
+  const setBrushMode = mode => {
+    params.brushMode = mode;
+    syncBrushMode();
+  };
+  brushToolBtn.on("click", () => setBrushMode("brush"));
+  eraserToolBtn.on("click", () => setBrushMode("eraser"));
+  syncBrushMode();
+  const brushStrengthInput = setTooltip(brushFolder.addInput(params, "brushStrength", {
+    min: 0,
+    max: 1,
+    step: 0.01,
+    label: UI_TEXT.brushStrength.label
+  }), UI_TEXT.brushStrength.tip);
+  const brushSizeInput = setTooltip(brushFolder.addInput(params, "brushSize", {
+    min: BRUSH_SIZE_MIN,
+    max: BRUSH_SIZE_MAX,
+    step: 0.01,
+    label: UI_TEXT.brushSize.label
+  }), UI_TEXT.brushSize.tip);
+  const brushFeatherInput = setTooltip(brushFolder.addInput(params, "brushFeather", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: UI_TEXT.brushFeather.label
+  }), UI_TEXT.brushFeather.tip);
+
+  // Let the wheel handler push its changes back into the slider displays.
+  refreshBrushInputs = () => {
+    brushSizeInput.refresh();
+    brushStrengthInput.refresh();
+    brushFeatherInput.refresh();
+  };
+  showFor(brushFolder, "mouseTrace");
+
+  /** Step to the next shape source, wrapping around at the end. */
+  const cycleSizeSource = (step = 1) => {
+    const order = UI_TEXT.sizeSource.options.map(o => o.value);
+    const current = order.indexOf(params.sizeSource);
+    // Modulo wraps both ways, so the list loops endlessly.
+    params.sizeSource = order[(current + step + order.length) % order.length];
+    syncSizeSourceInput();
+    onSizeSourceChange();
+    syncVisibility();
+    if (manager) manager.render();
+  };
+
+  // M cycles the source in every mode; B / E pick the tool while drawing.
+  // All ignored while typing in a panel field or with a modifier held.
+  window.addEventListener("keydown", e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = e.target;
+    if (el && (el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
+    const key = e.key.toLowerCase();
+    if (key === "m") {
+      cycleSizeSource(1);
+      return;
+    }
+    if (params.sizeSource !== "mouseTrace") return;
+    if (key === "b") setBrushMode("brush");else if (key === "e") setBrushMode("eraser");else if (key === "c") clearDrawing();
+  });
+
+  // --- Colours ----------------------------------------------------------
+  const colourFolder = pane.addFolder({
+    title: UI_TEXT.folders.colour
+  });
+
+  // Shape and background colour are chosen together, as an approved pairing —
+  // picking them independently would allow combinations that were never signed
+  // off. The picker below shows the approved composition artwork itself.
+  const compositionRow = colourFolder.addBlade({
+    view: "separator"
+  });
+  const compositionCell = compositionRow.element;
+  const compositionGrid = document.createElement("div");
+  compositionGrid.className = "comp-grid";
+  compositionGrid.setAttribute("role", "radiogroup");
+  compositionGrid.setAttribute("aria-label", UI_TEXT.composition.label);
+  const markActiveComposition = () => {
+    Array.from(compositionGrid.children).forEach((button, i) => {
+      const comp = ARTWORK_COMPOSITIONS[i];
+      const isActive = comp.fill === params.fill && comp.background === params.background;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-checked", isActive ? "true" : "false");
+    });
+  };
+  ARTWORK_COMPOSITIONS.forEach(comp => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "comp-swatch";
+    button.title = comp.label;
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-label", comp.label);
+
+    // The approved artwork itself, rather than a redrawn approximation.
+    const thumb = document.createElement("img");
+    thumb.src = COMPOSITIONS_DIR + comp.file;
+    thumb.alt = "";
+    thumb.draggable = false;
+    button.appendChild(thumb);
+    button.addEventListener("click", () => {
+      params.fill = comp.fill;
+      params.background = comp.background;
+      markActiveComposition();
+      pane.refresh();
+      if (manager) manager.render();
+    });
+    compositionGrid.appendChild(button);
+  });
+  const compositionLabel = document.createElement("div");
+  compositionLabel.className = "comp-label";
+  compositionLabel.textContent = UI_TEXT.composition.label;
+  compositionCell.appendChild(compositionLabel);
+  compositionCell.appendChild(compositionGrid);
+  compositionCell.title = UI_TEXT.composition.tip;
+  markActiveComposition();
   let svgExportDotsTimer = null;
   const runSvgExport = (destination, btn, busyBase, idleTitle) => {
     if (!manager || svgExportDotsTimer != null) return;
     svgExportDestination = destination;
     btn.disabled = true;
     btn.title = `${busyBase}.`;
-    const labelEl = btn.element.querySelector('.tp-btnv_t');
+    const labelEl = btn.element.querySelector(".tp-btnv_t");
     if (labelEl) labelEl.textContent = `${busyBase}.`;
     let dotPhase = 0;
     const tickDots = () => {
       dotPhase = (dotPhase + 1) % 3;
-      const t = `${busyBase}${'.'.repeat(dotPhase + 1)}`;
+      const t = `${busyBase}${".".repeat(dotPhase + 1)}`;
       btn.title = t;
       if (labelEl) labelEl.textContent = t;
     };
@@ -35764,7 +36692,7 @@ function createPane() {
           clearInterval(svgExportDotsTimer);
           svgExportDotsTimer = null;
         }
-        svgExportDestination = 'clipboard';
+        svgExportDestination = "clipboard";
         btn.title = idleTitle;
         if (labelEl) labelEl.textContent = idleTitle;
         btn.disabled = false;
@@ -35774,50 +36702,76 @@ function createPane() {
       requestAnimationFrame(runExport);
     });
   };
-  const exportBtn = pane.addButton({
-    title: 'Copy to Illustrator'
+
+  // --- Save & export ----------------------------------------------------
+  const outputFolder = pane.addFolder({
+    title: UI_TEXT.folders.output
   });
-  exportBtn.on('click', () => runSvgExport('clipboard', exportBtn, 'Copying', 'Copy to Illustrator'));
-  const exportSvgBtn = pane.addButton({
-    title: 'Export SVG'
+  const exportBtn = outputFolder.addButton({
+    title: UI_TEXT.copySvg.label
   });
-  exportSvgBtn.on('click', () => runSvgExport('file', exportSvgBtn, 'Exporting', 'Export SVG'));
+  setTooltip(exportBtn, UI_TEXT.copySvg.tip);
+  exportBtn.on("click", () => runSvgExport("clipboard", exportBtn, "Copying", UI_TEXT.copySvg.label));
+  const exportSvgBtn = outputFolder.addButton({
+    title: UI_TEXT.exportSvg.label
+  });
+  setTooltip(exportSvgBtn, UI_TEXT.exportSvg.tip);
+  exportSvgBtn.on("click", () => runSvgExport("file", exportSvgBtn, "Exporting", UI_TEXT.exportSvg.label));
 
   // Capture canvas to WebM while optional media audio plays (see recording module).
-  const rec = pane.addButton({
-    title: 'Record video'
+  const rec = outputFolder.addButton({
+    title: UI_TEXT.record.label
   });
+  setTooltip(rec, UI_TEXT.record.tip);
   const recorder = createRecorder({
     getCanvas: () => elCanvas,
     getMedia: () => mediaSetup.state.media,
     onStateChange: isRecording => {
-      rec.title = isRecording ? 'Stop recording' : 'Record video';
+      isRecordingVideo = isRecording;
+      rec.title = isRecording ? "Stop recording" : UI_TEXT.record.label;
+    },
+    // The preview canvas is downscaled to fit (scaleToView), so recording it as
+    // is would produce a video at preview size. Render at the true canvas size
+    // for the duration of the recording, then go back to the cheap preview.
+    onBeforeStart: () => {
+      if (manager) manager.update({
+        scaleToView: false
+      });
+    },
+    onAfterStop: () => {
+      if (manager) manager.update({
+        scaleToView: true
+      });
     }
   });
-  rec.on('click', () => recorder.toggle());
+  rec.on("click", () => recorder.toggle());
 
   // Any slider change should redraw the current frame without reloading the sketch.
-  pane.on('change', () => {
+  pane.on("change", () => {
     if (manager) manager.render();
   });
 
   // Choosing a file forces media-driven sizing and refreshes the size-source control.
-  mediaSetup.inputMedia.addEventListener('change', () => {
-    params.sizeSource = 'media';
+  mediaSetup.inputMedia.addEventListener("change", () => {
+    params.sizeSource = "media";
     syncSizeSourceInput();
     onSizeSourceChange();
-    syncMediaPostControlsVisibility();
+    syncVisibility();
   });
+
+  // All mode-scoped controls are registered by now; apply the starting state.
+  syncVisibility();
   createFooter(paneDiv, ver, date);
 
-  // add logo at top of the pane logo.svg 
+  // add logo at top of the pane logo.svg
   // append at top of the paneDiv
-  const mainLogo = document.createElement('img');
-  mainLogo.src = './assets/logo.svg';
-  mainLogo.alt = 'Tahreez Elements Generator';
-  mainLogo.width = 150;
-  mainLogo.style.margin = '10px';
-  mainLogo.style.marginTop = '20px';
+  const mainLogo = document.createElement("img");
+  mainLogo.src = "./assets/logo.svg";
+  mainLogo.alt = "Tahreez Elements Generator";
+  mainLogo.width = 110;
+  mainLogo.style.margin = "16px";
+  mainLogo.style.marginTop = "28px";
+  mainLogo.style.marginBottom = "22px";
   // logo.height = 26;
   paneDiv.insertBefore(mainLogo, paneDiv.firstChild);
 }
@@ -35835,10 +36789,10 @@ async function start() {
 }
 start(); // Browser entry (no bundler top-level await in this file).
 
-},{"./modules/events.js":1,"./modules/mediaSetup.js":2,"./modules/metaballs.js":3,"./modules/myLib.js":4,"./modules/recording.js":6,"./modules/svgFrameLog.js":7,"canvas-sketch":20,"canvas-sketch-util/color":10,"canvas-sketch-util/math":18,"canvas-sketch-util/random":19,"tweakpane":27}],29:[function(require,module,exports){
+},{"./modules/events.js":1,"./modules/mediaSetup.js":2,"./modules/metaballs.js":3,"./modules/myLib.js":4,"./modules/recording.js":6,"./modules/shortcutsOverlay.js":7,"./modules/svgFrameLog.js":8,"canvas-sketch":21,"canvas-sketch-util/math":19,"canvas-sketch-util/random":20,"tweakpane":28}],30:[function(require,module,exports){
 (function (global){(function (){
 
 global.CANVAS_SKETCH_DEFAULT_STORAGE_KEY = window.location.href;
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}]},{},[28,29]);
+},{}]},{},[29,30]);

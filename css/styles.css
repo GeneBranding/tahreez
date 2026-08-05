@@ -1,17 +1,16 @@
 body {
-  /* background-color: var(--black); */
-  background-color: #252525;
+  background-color: var(--brand-surface);
 }
 
 @font-face {
-  font-family: 'Lifta';
-  src: url('WebFont/Lifta/Lifta-Black.woff') format('woff');
-  src: url('WebFont/Lifta/Lifta-Black.woff2') format('woff2');
+  font-family: "Lifta";
+  src: url("WebFont/Lifta/Lifta-Black.woff") format("woff");
+  src: url("WebFont/Lifta/Lifta-Black.woff2") format("woff2");
 }
 
 * {
   /* font-family: 'Roboto', sans-serif !important; */
-  font-family: 'Cutive Mono', monospace !important;
+  font-family: "Cutive Mono", monospace !important;
   font-size: 14px !important;
 }
 
@@ -29,8 +28,10 @@ body {
 }
 
 .paneDiv {
+  padding-left: 10px;
   flex-grow: 0;
   height: 100vh;
+  background-color: var(--brand-surface);
 }
 
 .paneDiv * :not(a) {
@@ -42,13 +43,19 @@ body {
   padding-bottom: 10px;
   flex-grow: 2;
   display: flex;
-  align-items: flex-start;
+  /* Centre the artwork in whatever space is left beside the panel. */
+  align-items: center;
+  justify-content: center;
 }
 
+/* Fill the area so the canvas has a definite height to size against; without
+   this the wrapper collapses to content height and the artwork sits at the top. */
 .image-wrapper {
   flex-grow: 1;
+  height: 100%;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: center;
 }
 
 canvas {
@@ -144,8 +151,8 @@ canvas {
   position: relative;
 
   flex-grow: 0;
-  height: 25px;
-  width: 25px;
+  height: 20px;
+  width: 20px;
   display: flex;
   /* align-items: flex-start; */
 }
@@ -153,29 +160,53 @@ canvas {
 .footnote {
   /* border: #ffffff solid 1px; */
   flex-grow: 1;
-  font-size: 10px !important;
+  font-size: 8px !important;
   box-sizing: border-box;
   /* padding-top: 4px; */
   position: relative;
-  height: 25px;
+  height: 20px;
   line-height: 1.2;
-  color: #ffffff80;
+  color: var(--ui-text-muted);
 }
 
 :root {
+  /* -------------------------------------------------------------------------
+     BRAND PALETTE — change these four values to re-skin the whole interface.
+     Everything below derives from them.
+     ------------------------------------------------------------------------- */
+  --brand-accent: #0086ff;
+  --brand-accent-strong: #339dff; /* lighter accent, for pressed/active states */
+  --brand-surface: #171e21; /* panel + page background (darkest tone) */
+  --brand-surface-raised: #2e3d44; /* buttons, folder headers, recessed panels */
+
   --white: #f5f5f7;
   --black: #000000;
+
+  /* Derived UI tokens */
+  --ui-text: var(--white);
+  --ui-text-muted: #ffffff80;
+  --ui-border: #ffffff26;
+  --ui-slider-rest: #8a9298; /* neutral grey until hover/drag */
+  /* Folder header: a step darker than --brand-surface-raised so the header
+     reads as a container and not as another control. Sits between the page
+     background and the raised controls. */
+  --brand-surface-header: #212b31;
+
+  /* Tweakpane theme */
+  /* Spacing: Tweakpane's own knobs, rather than padding each blade by hand. */
+  --tp-container-vertical-padding: 8px; /* space inside a folder */
+  --tp-blade-spacing: 6px; /* gap between controls */
   --tp-base-background-color: hsla(0, 0%, 0%, 0);
   --tp-base-shadow-color: hsla(0, 0%, 0%, 0);
-  --tp-button-background-color: #4a4a4a;
-  --tp-button-background-color-active: rgb(139, 139, 139);
-  --tp-button-background-color-focus: rgb(139, 139, 139);
-  --tp-button-background-color-hover: rgb(139, 139, 139);
+  --tp-button-background-color: var(--brand-surface-raised);
+  --tp-button-background-color-active: var(--brand-accent-strong);
+  --tp-button-background-color-focus: var(--brand-accent);
+  --tp-button-background-color-hover: var(--brand-accent);
   --tp-button-foreground-color: rgb(250, 250, 250);
-  --tp-container-background-color: hsla(0, 0%, 73%, 0.3);
-  --tp-container-background-color-active: hsla(0, 0%, 0%, 0.6);
-  --tp-container-background-color-focus: hsla(0, 0%, 0%, 0.5);
-  --tp-container-background-color-hover: hsla(0, 0%, 0%, 0.4);
+  --tp-container-background-color: var(--brand-surface-raised);
+  --tp-container-background-color-active: var(--brand-accent);
+  --tp-container-background-color-focus: var(--brand-surface-raised);
+  --tp-container-background-color-hover: var(--brand-accent);
   --tp-container-foreground-color: var(--white);
   --tp-groove-foreground-color: hsla(0, 0%, 0%, 0.2);
   --tp-input-background-color: hsla(0, 0%, 55%, 0.3);
@@ -188,6 +219,86 @@ canvas {
   --tp-monitor-foreground-color: hsla(0, 0%, 100%, 0.3);
 }
 
+/* -------------------------------------------------------------------------
+   FOLDER RHYTHM
+   Tweakpane's own spacing variables do the work where they can:
+     --tp-container-vertical-padding  space inside a folder's content area
+     --tp-blade-spacing               gap between controls
+   The gap between folders and the darker header need explicit rules, since
+   Tweakpane paints folder headers and buttons from the same colour token.
+   ------------------------------------------------------------------------- */
+
+/* Folder header, one step darker than the controls it contains. */
+.tp-fldv_b {
+  background-color: var(--brand-surface-header) !important;
+}
+
+/* Folder title: smaller and dimmer than the control labels, so headers read as
+   quiet section markers rather than competing with the controls.
+   font-size needs !important to beat the global `* { font-size: 14px }`. */
+.tp-fldv_t {
+  font-size: 11px !important;
+  color: var(--ui-text-muted);
+}
+
+/* Back to full strength on the accent background, where dim text would be hard
+   to read. */
+.tp-fldv_b:hover .tp-fldv_t,
+.tp-fldv_b:focus .tp-fldv_t,
+.tp-fldv_b:active .tp-fldv_t {
+  color: var(--ui-text);
+}
+
+/* Keep the interactive states on the accent, as elsewhere in the panel. */
+.tp-fldv_b:hover {
+  background-color: var(--brand-accent) !important;
+}
+
+.tp-fldv_b:focus,
+.tp-fldv_b:active {
+  background-color: var(--brand-accent-strong) !important;
+}
+
+/* The folder's content area: breathing room under the last control, and the
+   same dark tone as the header. Tweakpane leaves this container unpainted and
+   insets its controls (padding-left on the container, margin-left on each
+   control), so colouring it fills the strip down the left edge — and the gaps
+   between controls — tying the whole folder together as one block. */
+.tp-fldv_c {
+  background-color: var(--brand-surface-header) !important;
+  padding-bottom: 10px !important;
+  padding-right: 4px !important;
+}
+
+/* Gap between folders, so each group reads as its own block. */
+.tp-rotv_c > .tp-fldv {
+  margin-bottom: 10px !important;
+}
+
+/* Sliders rest in grey and pick up the accent only on hover or while dragging. */
+.tp-sldv_k::before {
+  background-color: var(--ui-slider-rest) !important;
+}
+
+.tp-sldv_k::after {
+  background-color: var(--ui-slider-rest) !important;
+}
+
+.tp-sldv_t:hover .tp-sldv_k::before,
+.tp-sldv_t:focus .tp-sldv_k::before,
+.tp-sldv_t:active .tp-sldv_k::before {
+  background-color: var(--brand-accent) !important;
+}
+
+.tp-sldv_t:hover .tp-sldv_k::after,
+.tp-sldv_t:focus .tp-sldv_k::after {
+  background-color: var(--brand-accent) !important;
+}
+
+.tp-sldv_t:active .tp-sldv_k::after {
+  background-color: var(--brand-accent-strong) !important;
+}
+
 /* unvisited link */
 a {
   text-decoration: none;
@@ -195,40 +306,302 @@ a {
 }
 
 a:link {
-  color: #ffffff80;
+  color: var(--ui-text-muted);
 }
 
 /* visited link */
 a:visited {
-  color: #ffffff80;
+  color: var(--ui-text-muted);
 }
 
 /* mouse over link */
 a:hover {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--brand-accent);
 }
 
 /* selected link */
 a:active {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--brand-accent-strong);
 }
 
 .icon {
-  fill: #ffffff80;
+  fill: var(--ui-text-muted);
 }
 
 .icon:link {
-  fill: #ffffff80;
+  fill: var(--ui-text-muted);
 }
 
 .icon:visited {
-  fill: #ffffff80;
+  fill: var(--ui-text-muted);
 }
 
 .icon:hover {
-  fill: rgba(255, 255, 255, 0.8);
+  fill: var(--brand-accent);
 }
 
 .icon:active {
-  fill: rgba(255, 255, 255, 0.8);
+  fill: var(--brand-accent-strong);
+}
+
+/* -------------------------------------------------------------------------
+   FLOATING SHORTCUTS WIDGET
+   Pinned to the bottom-right of the VIEWPORT (not any container) and stacked
+   above everything else on the page.
+
+   Styling follows the rest of the interface: square corners, --brand-surface
+   card on a --brand-surface-raised button, accent on hover. Note the global
+   `* { font-size: 14px !important }` rule — every size here needs !important.
+   ------------------------------------------------------------------------- */
+
+.shortcuts-root {
+  /* !important + explicit inset so no later layout rule can re-anchor this to
+     a container. Fixed resolves against the viewport as long as no ancestor
+     has a transform/filter/contain — none do; keep it a direct child of body. */
+  position: fixed !important;
+  inset: auto 16px 16px auto;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  /* Let clicks through the gap between card and button. */
+  pointer-events: none;
+}
+
+.shortcuts-button,
+.shortcuts-card {
+  pointer-events: auto;
+}
+
+/* Collapsed to a square icon; hovering reveals the label by animating the
+   label's max-width (width:auto is not animatable). Pinned right, so the
+   button grows leftwards. */
+.shortcuts-button {
+  box-sizing: border-box;
+  height: 34px;
+  flex: 0 0 auto;
+  order: 2;
+  border: 1px solid var(--ui-border);
+  background-color: var(--brand-surface-raised);
+  color: var(--tp-button-foreground-color);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  cursor: pointer;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.5);
+  transition: background-color 0.18s ease;
+}
+
+.shortcuts-button-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shortcuts-button-label {
+  flex: 0 0 auto;
+  display: block;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  font-size: 12px !important;
+  letter-spacing: 1px;
+  transition:
+    max-width 0.28s ease,
+    opacity 0.18s ease,
+    padding-right 0.28s ease;
+  padding-right: 0;
+}
+
+.shortcuts-button:hover .shortcuts-button-label,
+.shortcuts-button:focus-visible .shortcuts-button-label,
+.shortcuts-root.is-open .shortcuts-button-label {
+  /* Comfortably past the real text width; max-width animates, width can't. */
+  max-width: 160px;
+  opacity: 1;
+  padding-right: 12px;
+}
+
+.shortcuts-button:hover,
+.shortcuts-root.is-open .shortcuts-button {
+  background-color: var(--brand-accent);
+}
+
+/* Respect users who prefer no motion. */
+@media (prefers-reduced-motion: reduce) {
+  .shortcuts-button,
+  .shortcuts-button-label {
+    transition: none;
+  }
+}
+
+.shortcuts-button:focus-visible {
+  outline: 1px solid var(--brand-accent-strong);
+  outline-offset: 2px;
+}
+
+/* The card: square, bordered, deep shadow — matching the panel styling. */
+.shortcuts-card {
+  box-sizing: border-box;
+  order: 1;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(340px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  background-color: var(--brand-surface);
+  border: 1px solid var(--ui-border);
+  box-shadow: 0 10px 40px -8px rgba(0, 0, 0, 0.6);
+}
+
+.shortcuts-card[hidden] {
+  display: none;
+}
+
+/* Header: same padding and rule as the panel folder headers. */
+.shortcuts-heading {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--white);
+  font-size: 14px !important;
+  letter-spacing: 1px;
+}
+
+.shortcuts-group-title {
+  padding: 0 16px;
+  margin: 14px 0 6px;
+  color: var(--ui-text-muted);
+  font-size: 12px !important;
+  letter-spacing: 1px;
+}
+
+.shortcuts-list {
+  margin: 0 0 14px;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.shortcuts-list:last-child {
+  margin-bottom: 16px;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.shortcuts-keys {
+  margin: 0;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* Keys read as the panel's input chips: square, recessed, light text. */
+.shortcuts-key {
+  display: inline-block;
+  box-sizing: border-box;
+  min-width: 20px;
+  padding: 3px 7px;
+  border: 1px solid var(--ui-border);
+  background-color: var(--tp-input-background-color);
+  color: var(--tp-input-foreground-color);
+  font-family: inherit;
+  font-size: 12px !important;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.shortcuts-plus {
+  color: var(--ui-text-muted);
+  font-size: 12px !important;
+}
+
+.shortcuts-text {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: 12px !important;
+}
+
+@media screen and (max-width: 900px) {
+  .shortcuts-root {
+    inset: auto 10px 10px auto;
+  }
+
+  .shortcuts-card {
+    max-width: calc(100vw - 20px);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   COLOUR COMPOSITION PICKER
+   Approved shape/background pairings, shown as the source artwork from
+   assets/color-comps/. Replaces the two independent colour controls.
+   ------------------------------------------------------------------------- */
+
+.comp-label {
+  font-size: 11px !important;
+  color: var(--ui-text-muted);
+  padding: 2px 0 6px 4px;
+}
+
+/* Exactly 7 per row, two rows.
+   Fixed px columns, not 1fr: 1fr stretches each thumbnail to fill the pane.
+   A wrapping flex row does not work either — the panel is auto-width, so a
+   single row of 14 simply widens the pane and the wrap never triggers, which
+   is why the layout changed with the selected source. A fixed column count
+   has an intrinsic width, so it lays out the same in every mode. */
+.comp-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 26px);
+  gap: 4px;
+  width: max-content;
+  padding: 0 4px 4px;
+}
+
+.comp-swatch {
+  box-sizing: border-box;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  background: none;
+  border: 1px solid var(--ui-border);
+  /* Reserved up front so selecting one does not shift the grid. */
+  outline: 2px solid transparent;
+  outline-offset: -3px;
+  display: flex;
+  overflow: hidden;
+}
+
+.comp-swatch img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.comp-swatch:hover {
+  border-color: var(--ui-text);
+}
+
+.comp-swatch.is-active {
+  border-color: var(--brand-accent);
+  outline-color: var(--brand-accent);
+}
+
+.comp-swatch:focus-visible {
+  border-color: var(--brand-accent-strong);
 }
